@@ -9,7 +9,7 @@
  * * Connect https://httpbin.org test get request
  * * Example uses a forked TinyGSM <https://github.com/lewisxhe/TinyGSM>, which will not compile successfully using the mainline TinyGSM.
  */
-#define TINY_GSM_RX_BUFFER          1024 // Set RX buffer to 1Kb
+#define TINY_GSM_RX_BUFFER 1024 // Set RX buffer to 1Kb
 
 // See all AT commands, if wanted
 #define DUMP_AT_COMMANDS
@@ -17,7 +17,7 @@
 #include "utilities.h"
 #include <TinyGsmClient.h>
 
-#ifdef DUMP_AT_COMMANDS  // if enabled it requires the streamDebugger lib
+#ifdef DUMP_AT_COMMANDS // if enabled it requires the streamDebugger lib
 #include <StreamDebugger.h>
 StreamDebugger debugger(SerialAT, Serial);
 TinyGsm modem(debugger);
@@ -28,7 +28,7 @@ TinyGsm modem(SerialAT);
 // It depends on the operator whether to set up an APN. If some operators do not set up an APN,
 // they will be rejected when registering for the network. You need to ask the local operator for the specific APN.
 // APNs from other operators are welcome to submit PRs for filling.
-//#define NETWORK_APN     "ctlte"             //ctlte: China Telecom
+#define NETWORK_APN "Internet"
 
 // When using an IPv6 access point, the correct IPv6 APN must be configured.
 bool use_ipv6_access_point = false; // Whether to use IPv6 to set the access point
@@ -43,10 +43,10 @@ String apn = "";
 const char *request_url[] = {
     "https://httpbin.org/get",
     "https://vsh.pp.ua/TinyGSM/logo.txt",
-    "https://ipapi.co/timezone",         // Access may be blocked by a firewall
+    "https://ipapi.co/timezone", // Access may be blocked by a firewall
     "http://ip-api.com/json/23.158.104.183",
-    "https://ikfu.azurewebsites.net/api/GetUtcTime",  // https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/issues/243
-    "http://6.ipw.cn"       //ipv6 only
+    "https://ikfu.azurewebsites.net/api/GetUtcTime", // https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/issues/243
+    "http://6.ipw.cn"                                // ipv6 only
 };
 
 // ISSUES ： https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/issues/243
@@ -56,267 +56,270 @@ ServerSSLVersion sslVersion[] = {
     TINYGSM_SSL_AUTO,   // vsh.pp.ua
     TINYGSM_SSL_AUTO,   // ipapi.co
     TINYGSM_SSL_AUTO,   // ip-api.com
-    TINYGSM_SSL_TLS1_2,  // azure
+    TINYGSM_SSL_TLS1_2, // azure
     TINYGSM_SSL_AUTO    // ipw.cn
 };
 
-void setup()
-{
-    Serial.begin(115200); // Set console baud rate
+void setup() {
+  Serial.begin(115200); // Set console baud rate
 
-    Serial.println("Start Sketch");
+  Serial.println("Start Sketch");
 
-    SerialAT.begin(115200, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
+  SerialAT.begin(115200, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
 
 #ifdef BOARD_POWERON_PIN
-    /* Set Power control pin output
-    * * @note      Known issues, ESP32 (V1.2) version of T-A7670, T-A7608,
-    *            when using battery power supply mode, BOARD_POWERON_PIN (IO12) must be set to high level after esp32 starts, otherwise a reset will occur.
-    * */
-    pinMode(BOARD_POWERON_PIN, OUTPUT);
-    digitalWrite(BOARD_POWERON_PIN, HIGH);
+  /* Set Power control pin output
+   * * @note      Known issues, ESP32 (V1.2) version of T-A7670, T-A7608,
+   *            when using battery power supply mode, BOARD_POWERON_PIN (IO12) must be set to high level after esp32 starts, otherwise a reset will occur.
+   * */
+  pinMode(BOARD_POWERON_PIN, OUTPUT);
+  digitalWrite(BOARD_POWERON_PIN, HIGH);
 #endif
 
-    // Set modem reset pin ,reset modem
+  // Set modem reset pin ,reset modem
 #ifdef MODEM_RESET_PIN
-    pinMode(MODEM_RESET_PIN, OUTPUT);
-    digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL); delay(100);
-    digitalWrite(MODEM_RESET_PIN, MODEM_RESET_LEVEL); delay(2600);
-    digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL);
+  pinMode(MODEM_RESET_PIN, OUTPUT);
+  digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL);
+  delay(100);
+  digitalWrite(MODEM_RESET_PIN, MODEM_RESET_LEVEL);
+  delay(2600);
+  digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL);
 #endif
 
 #ifdef MODEM_FLIGHT_PIN
-    // If there is an airplane mode control, you need to exit airplane mode
-    pinMode(MODEM_FLIGHT_PIN, OUTPUT);
-    digitalWrite(MODEM_FLIGHT_PIN, HIGH);
+  // If there is an airplane mode control, you need to exit airplane mode
+  pinMode(MODEM_FLIGHT_PIN, OUTPUT);
+  digitalWrite(MODEM_FLIGHT_PIN, HIGH);
 #endif
 
 #ifdef MODEM_DTR_PIN
-    // Pull down DTR to ensure the modem is not in sleep state
-    Serial.printf("Set DTR pin %d LOW\n", MODEM_DTR_PIN);
-    pinMode(MODEM_DTR_PIN, OUTPUT);
-    digitalWrite(MODEM_DTR_PIN, LOW);
+  // Pull down DTR to ensure the modem is not in sleep state
+  Serial.printf("Set DTR pin %d LOW\n", MODEM_DTR_PIN);
+  pinMode(MODEM_DTR_PIN, OUTPUT);
+  digitalWrite(MODEM_DTR_PIN, LOW);
 #endif
 
-    // Turn on the modem
-    pinMode(BOARD_PWRKEY_PIN, OUTPUT);
-    digitalWrite(BOARD_PWRKEY_PIN, LOW);
-    delay(100);
-    digitalWrite(BOARD_PWRKEY_PIN, HIGH);
-    delay(MODEM_POWERON_PULSE_WIDTH_MS);
-    digitalWrite(BOARD_PWRKEY_PIN, LOW);
+  // Turn on the modem
+  pinMode(BOARD_PWRKEY_PIN, OUTPUT);
+  digitalWrite(BOARD_PWRKEY_PIN, LOW);
+  delay(100);
+  digitalWrite(BOARD_PWRKEY_PIN, HIGH);
+  delay(MODEM_POWERON_PULSE_WIDTH_MS);
+  digitalWrite(BOARD_PWRKEY_PIN, LOW);
 
-    // Check if the modem is online
-    Serial.println("Start modem...");
+  // Check if the modem is online
+  Serial.println("Start modem...");
 
-    int retry = 0;
-    while (!modem.testAT(1000)) {
-        Serial.println(".");
-        if (retry++ > 30) {
-            digitalWrite(BOARD_PWRKEY_PIN, LOW);
-            delay(100);
-            digitalWrite(BOARD_PWRKEY_PIN, HIGH);
-            delay(MODEM_POWERON_PULSE_WIDTH_MS);
-            digitalWrite(BOARD_PWRKEY_PIN, LOW);
-            retry = 0;
-        }
+  int retry = 0;
+  while (!modem.testAT(1000)) {
+    Serial.println(".");
+    if (retry++ > 30) {
+      digitalWrite(BOARD_PWRKEY_PIN, LOW);
+      delay(100);
+      digitalWrite(BOARD_PWRKEY_PIN, HIGH);
+      delay(MODEM_POWERON_PULSE_WIDTH_MS);
+      digitalWrite(BOARD_PWRKEY_PIN, LOW);
+      retry = 0;
     }
-    Serial.println();
+  }
+  Serial.println();
 
-    // Check if SIM card is online
-    SimStatus sim = SIM_ERROR;
-    while (sim != SIM_READY) {
-        sim = modem.getSimStatus();
-        switch (sim) {
-        case SIM_READY:
-            Serial.println("SIM card online");
-            break;
-        case SIM_LOCKED:
-            Serial.println("The SIM card is locked. Please unlock the SIM card first.");
-            // const char *SIMCARD_PIN_CODE = "123456";
-            // modem.simUnlock(SIMCARD_PIN_CODE);
-            break;
-        default:
-            break;
-        }
-        delay(1000);
+  // Check if SIM card is online
+  SimStatus sim = SIM_ERROR;
+  while (sim != SIM_READY) {
+    sim = modem.getSimStatus();
+    switch (sim) {
+    case SIM_READY:
+      Serial.println("SIM card online");
+      break;
+    case SIM_LOCKED:
+      Serial.println("The SIM card is locked. Please unlock the SIM card first.");
+      // const char *SIMCARD_PIN_CODE = "123456";
+      // modem.simUnlock(SIMCARD_PIN_CODE);
+      break;
+    default:
+      break;
     }
+    delay(1000);
+  }
 
 #ifdef TINY_GSM_MODEM_HAS_NETWORK_MODE
-    if (!modem.setNetworkMode(MODEM_NETWORK_AUTO)) {
-        Serial.println("Set network mode failed!");
-    }
-    String mode = modem.getNetworkModeString();
-    Serial.print("Current network mode : ");
-    Serial.println(mode);
+  if (!modem.setNetworkMode(MODEM_NETWORK_AUTO)) {
+    Serial.println("Set network mode failed!");
+  }
+  String mode = modem.getNetworkModeString();
+  Serial.print("Current network mode : ");
+  Serial.println(mode);
 #endif
 
 #ifdef TINY_GSM_MODEM_HAS_PREFERRED_MODE
-    if (!modem.setPreferredMode(MODEM_PREFERRED_CATM_NBIOT)) {
-        Serial.println("Set network preferred failed!");
-    }
-    String prefMode = modem.getPreferredModeString();
-    Serial.print("Current preferred mode : ");
-    Serial.println(prefMode);
+  if (!modem.setPreferredMode(MODEM_PREFERRED_CATM_NBIOT)) {
+    Serial.println("Set network preferred failed!");
+  }
+  String prefMode = modem.getPreferredModeString();
+  Serial.print("Current preferred mode : ");
+  Serial.println(prefMode);
 #endif
-
 
 #ifdef NETWORK_APN
-    // Some carriers require an APN to be configured before registration is allowed.
-    Serial.printf("Set network apn : %s\n", NETWORK_APN);
-    if (!modem.setNetworkAPN(NETWORK_APN)) {
-        Serial.println("Set network apn error !");
-    }
+  // Some carriers require an APN to be configured before registration is allowed.
+  Serial.printf("Set network apn : %s\n", NETWORK_APN);
+  if (!modem.setNetworkAPN(NETWORK_APN)) {
+    Serial.println("Set network apn error !");
+  }
 #endif
 
-    // Check network registration status and network signal status
-    int16_t sq ;
-    Serial.print("Wait for the modem to register with the network.");
-    RegStatus status = REG_NO_RESULT;
-    while (status == REG_NO_RESULT || status == REG_SEARCHING || status == REG_UNREGISTERED) {
-        status = modem.getRegistrationStatus();
-        switch (status) {
-        case REG_UNREGISTERED:
-        case REG_SEARCHING:
-            sq = modem.getSignalQuality();
-            Serial.printf("[%lu] Signal Quality:%d\n", millis() / 1000, sq);
-            delay(1000);
-            break;
-        case REG_DENIED:
-            Serial.println("Network registration was rejected, please check if the APN is correct");
-            return ;
-        case REG_OK_HOME:
-            Serial.println("Online registration successful");
-            break;
-        case REG_OK_ROAMING:
-            Serial.println("Network registration successful, currently in roaming mode");
-            break;
-        default:
-            Serial.printf("Registration Status:%d\n", status);
-            delay(1000);
-            break;
-        }
+  // Check network registration status and network signal status
+  int16_t sq;
+  Serial.print("Wait for the modem to register with the network.");
+  RegStatus status = REG_NO_RESULT;
+  while (status == REG_NO_RESULT || status == REG_SEARCHING || status == REG_UNREGISTERED) {
+    status = modem.getRegistrationStatus();
+    switch (status) {
+    case REG_UNREGISTERED:
+    case REG_SEARCHING:
+      sq = modem.getSignalQuality();
+      Serial.printf("[%lu] Signal Quality:%d\n", millis() / 1000, sq);
+      delay(1000);
+      break;
+    case REG_DENIED:
+      Serial.println("Network registration was rejected, please check if the APN is correct");
+      return;
+    case REG_OK_HOME:
+      Serial.println("Online registration successful");
+      break;
+    case REG_OK_ROAMING:
+      Serial.println("Network registration successful, currently in roaming mode");
+      break;
+    default:
+      Serial.printf("Registration Status:%d\n", status);
+      delay(1000);
+      break;
     }
-    Serial.println();
+  }
+  Serial.println();
 
 #ifdef MODEM_REG_SMS_ONLY
-    while (status == REG_SMS_ONLY) {
-        Serial.println("Registered for \"SMS only\", home network (applicable only when E-UTRAN), this type of registration cannot access the network. Please check the APN settings and ask the operator for the correct APN information and the balance and package of the SIM card. If you still cannot connect, please replace the SIM card and test again. Related ISSUE: https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/issues/307#issuecomment-3034800353");
-        delay(5000);
-    }
+  while (status == REG_SMS_ONLY) {
+    Serial.println("Registered for \"SMS only\", home network (applicable only when E-UTRAN), this type of registration cannot access the network. Please check the APN settings and ask the operator for the correct APN information and the balance and package of the SIM card. If you still cannot connect, please replace the SIM card and test again. Related ISSUE: https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/issues/307#issuecomment-3034800353");
+    delay(5000);
+  }
 #endif
 
-    Serial.printf("Registration Status:%d\n", status);
-    delay(1000);
+  Serial.printf("Registration Status:%d\n", status);
+  delay(1000);
 
-    String ueInfo;
-    if (modem.getSystemInformation(ueInfo)) {
-        Serial.print("Inquiring UE system information:");
-        Serial.println(ueInfo);
+  String ueInfo;
+  if (modem.getSystemInformation(ueInfo)) {
+    Serial.print("Inquiring UE system information:");
+    Serial.println(ueInfo);
+  }
+
+  /**
+   *  Configure the network APN and specify whether to access the network using IPv6. If unsure, please consult your SIM card provider.
+   */
+  Serial.print("Connecting to network with APN:");
+  Serial.println(apn);
+  Serial.print("Use IPv6 access point:");
+  Serial.println(use_ipv6_access_point ? "true" : "false");
+  retry = 3;
+  while (retry--) {
+    if (modem.setNetworkActive(apn, use_ipv6_access_point)) {
+      break;
     }
+    Serial.println("Enable network failed, retry after 3s...");
+    delay(3000);
+  }
+  if (retry < 0) {
+    Serial.println("Failed to enable network!");
+    return;
+  }
+  delay(5000);
 
-    /**
-     *  Configure the network APN and specify whether to access the network using IPv6. If unsure, please consult your SIM card provider.
-     */
-    Serial.print("Connecting to network with APN:"); Serial.println(apn);
-    Serial.print("Use IPv6 access point:"); Serial.println(use_ipv6_access_point ? "true" : "false");
-    retry = 3;
+  String ipAddress = modem.getLocalIP();
+  Serial.print("Network IP:");
+  Serial.println(ipAddress);
+
+  // Print modem software version
+  String res;
+  modem.sendAT("+SIMCOMATI");
+  modem.waitResponse(10000UL, res);
+  Serial.println(res);
+
+  // If the status code 715 is returned, please see here
+  // https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/issues/117
+  Serial.println("Please make sure you are using the latest released version of the firmware. Find the latest version here: https://github.com/Xinyuan-LilyGO/LilyGo-Modem-Series#modem-firmware-upgrade-guide");
+  Serial.println("If you still have problems with the latest firmware, please open an issue. Otherwise, please do not create meaningless issues.");
+
+  for (int i = 0; i < sizeof(request_url) / sizeof(request_url[0]); ++i) {
+
+    int retry = 3;
+
     while (retry--) {
-        if (modem.setNetworkActive(apn, use_ipv6_access_point)) {
-            break;
-        }
-        Serial.println("Enable network failed, retry after 3s...");
+
+      // Initialize HTTPS
+      modem.https_begin();
+
+      Serial.print("Request URL : ");
+      Serial.println(request_url[i]);
+
+      // Set GET URT
+      if (!modem.https_set_url(request_url[i], sslVersion[i])) {
+        Serial.print("Failed to request : ");
+        Serial.println(request_url[i]);
+
+        // Debug
+        // modem.sendAT("+CSSLCFG=\"enableSNI\",0,1");
+        // modem.waitResponse();
         delay(3000);
+        continue;
+      }
+
+      // Send GET request
+      int httpCode = 0;
+      httpCode = modem.https_get();
+      if (httpCode != 200) {
+        Serial.print("HTTP get failed ! error code = ");
+        Serial.println(httpCode);
+        // Disconnect http server
+        modem.https_end();
+        delay(3000);
+        continue;
+      }
+
+      // Get HTTPS header information
+      String header = modem.https_header();
+      Serial.print("HTTP Header : ");
+      Serial.println(header);
+
+      delay(1000);
+
+      // Get HTTPS response
+      String body = modem.https_body();
+      Serial.print("HTTP body : ");
+      Serial.println(body);
+
+      delay(3000);
+
+      // Disconnect http server
+      modem.https_end();
+
+      break;
     }
-    if (retry < 0) {
-        Serial.println("Failed to enable network!");
-        return;
-    }
-    delay(5000);
 
-    String ipAddress = modem.getLocalIP();
-    Serial.print("Network IP:"); Serial.println(ipAddress);
-
-    // Print modem software version
-    String res;
-    modem.sendAT("+SIMCOMATI");
-    modem.waitResponse(10000UL, res);
-    Serial.println(res);
-
-    // If the status code 715 is returned, please see here
-    // https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/issues/117
-    Serial.println("Please make sure you are using the latest released version of the firmware. Find the latest version here: https://github.com/Xinyuan-LilyGO/LilyGo-Modem-Series#modem-firmware-upgrade-guide");
-    Serial.println("If you still have problems with the latest firmware, please open an issue. Otherwise, please do not create meaningless issues.");
-
-    for (int i = 0; i < sizeof(request_url) / sizeof(request_url[0]); ++i) {
-
-        int retry = 3;
-
-        while (retry--) {
-
-            // Initialize HTTPS
-            modem.https_begin();
-
-            Serial.print("Request URL : ");
-            Serial.println(request_url[i]);
-
-            // Set GET URT
-            if (!modem.https_set_url(request_url[i], sslVersion[i])) {
-                Serial.print("Failed to request : "); Serial.println(request_url[i]);
-
-                // Debug
-                // modem.sendAT("+CSSLCFG=\"enableSNI\",0,1");
-                // modem.waitResponse();
-                delay(3000);
-                continue;
-            }
-
-            // Send GET request
-            int httpCode = 0;
-            httpCode = modem.https_get();
-            if (httpCode != 200) {
-                Serial.print("HTTP get failed ! error code = ");
-                Serial.println(httpCode);
-                // Disconnect http server
-                modem.https_end();
-                delay(3000);
-                continue;
-            }
-
-            // Get HTTPS header information
-            String header = modem.https_header();
-            Serial.print("HTTP Header : ");
-            Serial.println(header);
-
-            delay(1000);
-
-            // Get HTTPS response
-            String body = modem.https_body();
-            Serial.print("HTTP body : ");
-            Serial.println(body);
-
-            delay(3000);
-
-            // Disconnect http server
-            modem.https_end();
-
-            break;
-        }
-
-        Serial.println("-------------------------------------");
-    }
+    Serial.println("-------------------------------------");
+  }
 }
 
-void loop()
-{
-    // Debug AT
-    if (SerialAT.available()) {
-        Serial.write(SerialAT.read());
-    }
-    if (Serial.available()) {
-        SerialAT.write(Serial.read());
-    }
-    delay(1);
+void loop() {
+  // Debug AT
+  if (SerialAT.available()) {
+    Serial.write(SerialAT.read());
+  }
+  if (Serial.available()) {
+    SerialAT.write(Serial.read());
+  }
+  delay(1);
 }
 
 #ifndef TINY_GSM_FORK_LIBRARY
@@ -341,9 +344,9 @@ Manufacturer: SIMCOM INCORPORATED
 Model: SIMCOM_SIM7600E-H
 Revision: LE11B14SIM7600M22_250217
 SIM7600M22_B14V01_250217
-QCN: 
+QCN:
 IMEI: xxxxxxxxxxxxx
-MEID: 
+MEID:
 +GCAP: +CGSM
 DeviceInfo: 173,170
 
