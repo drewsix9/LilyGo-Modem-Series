@@ -9,7 +9,7 @@
  * Hardware Setup:
  *  - LILYGO_T_A7670 board (ESP32 Master)
  *  - PIR sensor output → GPIO32 (wakeup trigger)
- *  - GPIO23 → ESP32CAM power enable (HIGH = ON)
+ *  - GPIO23 → ESP32CAM power enable (LOW = ON, HIGH = OFF - inverted logic for MOSFET driver)
  *  - GPIO18 (TX) → ESP32CAM GPIO16 (RX)
  *  - GPIO19 (RX) → ESP32CAM GPIO13 (TX)
  *  - Light sensor (e.g., BH1750) on I2C bus for LUX reading
@@ -25,7 +25,7 @@
  *
  * Workflow:
  *  1. PIR detects motion → ESP32 wakes from deep sleep
- *  2. Powers ON ESP32CAM via GPIO23
+ *  2. Powers ON ESP32CAM via GPIO17 (LOW = ON due to inverted logic)
  *  3. Reads LUX value from light sensor
  *  4. Waits for "READY" from camera
  *  5. Sends PHOTO command with parameters
@@ -40,7 +40,7 @@
 
 // ==================== PIN DEFINITIONS ====================
 #define PIR_SENSOR_PIN 32 // PIR sensor wakeup source
-#define CAM_PWR_EN_PIN 23 // Camera power enable (HIGH = ON)
+#define CAM_PWR_EN_PIN 23 // Camera power enable (LOW = ON, HIGH = OFF - inverted logic) - GPIO23
 #define UART_TX_PIN 18    // Free GPIO for TX to camera (avoid GPIO1,16,17)
 #define UART_RX_PIN 19    // Free GPIO for RX from camera (avoid GPIO3,16,17)
 
@@ -54,7 +54,7 @@
 // ==================== UART CONFIGURATION ====================
 #define UART_BAUD_RATE 115200
 #define UART_TIMEOUT_MS 10000 // Timeout waiting for camera response (increased for boot time)
-#define CAM_BOOT_TIME_MS 500  // Initial power-on delay (reduced, camera sends status as it boots)
+#define CAM_BOOT_TIME_MS 2500 // Initial power-on delay (camera needs ~2s to boot and send READY)
 
 // ==================== PHOTO PARAMETERS ====================
 #define PHOTO_WIDTH 1600  // Image width in pixels
@@ -74,6 +74,8 @@ uint16_t readLuxSensor();
 bool waitForCameraReady();
 bool sendPhotoCommand(uint16_t lux, uint16_t width, uint16_t height, uint8_t quality);
 String readCameraResponse(uint32_t timeout_ms);
+void uartToCameraEnable();
+void uartToCameraDisable();
 void powerOnCamera();
 void powerOffCamera();
 void enterDeepSleep();
@@ -87,14 +89,21 @@ void setup() {
   Serial.println("LILYGO A7670 - Camera UART Master");
   Serial.println("===========================================");
   Serial.println("[PINS] GPIO18(TX)->CAM_RX, GPIO19(RX)->CAM_TX");
-  Serial.println("[PINS] GPIO23->CAM_POWER, GPIO32->PIR_WAKEUP");
+  Serial.println("[PINS] GPIO23->CAM_POWER (LOW=ON), GPIO32->PIR_WAKEUP");
 
   // Print wakeup reason
   print_wakeup_reason();
 
-  // Initialize camera power pin
+  // Release GPIO hold from deep sleep (if it was held)
+  gpio_deep_sleep_hold_dis();
+  gpio_hold_dis((gpio_num_t)CAM_PWR_EN_PIN);
+
+  // Initialize camera power pin with MAXIMUM drive strength
   pinMode(CAM_PWR_EN_PIN, OUTPUT);
-  digitalWrite(CAM_PWR_EN_PIN, LOW); // Start with camera OFF
+  gpio_set_drive_capability((gpio_num_t)CAM_PWR_EN_PIN, GPIO_DRIVE_CAP_3); // Maximum 40mA
+  digitalWrite(CAM_PWR_EN_PIN, HIGH);                                      // Start with camera OFF (inverted logic)
+
+  Serial.println("[GPIO] GPIO23 configured with maximum drive strength");
 
   // Initialize I2C for light sensor
   Wire.begin(I2C_SDA, I2C_SCL);
@@ -170,7 +179,7 @@ void setup() {
 
   Serial.println("\n[CONFIG] System configuration:");
   Serial.println("  - Wakeup source: GPIO32 (PIR Sensor)");
-  Serial.println("  - Camera power: GPIO23 (HIGH = ON)");
+  Serial.println("  - Camera power: GPIO23 (LOW = ON, HIGH = OFF - inverted logic)");
   Serial.println("  - UART: GPIO18(TX) → CAM_GPIO16(RX), GPIO19(RX) ← CAM_GPIO13(TX)");
   Serial.printf("  - Photo size: %dx%d, Quality: %d\n",
                 PHOTO_WIDTH, PHOTO_HEIGHT, PHOTO_QUALITY);
@@ -233,11 +242,48 @@ uint16_t readLuxSensor() {
 }
 
 /**
+ * @brief Enable UART to camera and re-initialize the connection
+ * @note Prevents ghost power issues when camera is powered on
+ */
+void uartToCameraEnable() {
+  Serial.println("[UART] Enabling UART connection...");
+  CameraSerial.end();
+  delay(100);
+  pinMode(UART_TX_PIN, OUTPUT);
+  pinMode(UART_RX_PIN, INPUT);
+  CameraSerial.begin(UART_BAUD_RATE, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  delay(50);
+
+  // CRITICAL: Flush any garbage bytes from RX buffer
+  while (CameraSerial.available()) {
+    CameraSerial.read();
+  }
+
+  Serial.println("[UART] UART re-initialized and RX buffer flushed");
+}
+
+/**
+ * @brief Disable UART to camera and float pins to prevent backfeeding
+ * @note CRITICAL: Prevents ghost power through UART protection diodes when camera is off
+ */
+void uartToCameraDisable() {
+  Serial.println("[UART] Disabling UART connection (floating pins)...");
+  CameraSerial.flush();
+  CameraSerial.end();
+  delay(100);
+  pinMode(UART_TX_PIN, INPUT); // high-Z input - prevents backfeeding
+  pinMode(UART_RX_PIN, INPUT); // high-Z input - prevents backfeeding
+  Serial.println("[UART] UART disabled and pins floating (no ghost power)");
+}
+
+/**
  * @brief Power ON the camera
  */
 void powerOnCamera() {
-  Serial.println("[POWER] Turning camera ON (GPIO23 → HIGH)");
-  digitalWrite(CAM_PWR_EN_PIN, HIGH);
+  Serial.println("[POWER] Turning camera ON (GPIO23 → LOW - inverted logic)");
+  digitalWrite(CAM_PWR_EN_PIN, LOW); // Inverted logic: LOW = ON
+  delay(100);                        // Brief stabilization delay
+  uartToCameraEnable();              // Re-enable UART for communication
   Serial.println("[STATUS] Camera powered ON");
 }
 
@@ -245,37 +291,59 @@ void powerOnCamera() {
  * @brief Power OFF the camera
  */
 void powerOffCamera() {
-  Serial.println("[POWER] Turning camera OFF (GPIO23 → LOW)");
-  digitalWrite(CAM_PWR_EN_PIN, LOW);
-  Serial.println("[STATUS] Camera powered OFF");
+  Serial.println("[POWER] Turning camera OFF (GPIO23 → HIGH - inverted logic)");
+  digitalWrite(CAM_PWR_EN_PIN, HIGH); // Inverted logic: HIGH = OFF
+  delay(100);
+
+  // CRITICAL: Disable UART BEFORE holding GPIO to prevent backfeeding
+  uartToCameraDisable(); // Float UART pins (prevents ghost power through protection diodes)
+
+  // Hold GPIO23 state during deep sleep
+  gpio_hold_en((gpio_num_t)CAM_PWR_EN_PIN);
+  gpio_deep_sleep_hold_en();
+
+  Serial.println("[STATUS] Camera powered OFF and isolated");
 }
 
 /**
- * @brief Wait for "READY" message from camera
+ * @brief Wait for "READY" message from camera (searches for substring, handles garbage bytes)
  * @return true if READY received, false on timeout
  */
 bool waitForCameraReady() {
+  // Flush any remaining garbage bytes before waiting
+  while (CameraSerial.available()) {
+    CameraSerial.read();
+  }
+
   uint32_t startTime = millis();
-  String response = "";
+  String buffer = "";
+
+  Serial.println("[UART] Waiting for READY (searching for substring)...");
 
   while (millis() - startTime < UART_TIMEOUT_MS) {
-    if (CameraSerial.available()) {
+    while (CameraSerial.available()) {
       char c = CameraSerial.read();
-      response += c;
 
-      if (response.endsWith("READY\n")) {
+      // Only keep printable ASCII characters (filters out garbage bytes)
+      if (c >= 32 && c <= 126) {
+        buffer += c;
+      }
+
+      // Check if READY is present anywhere in the buffer
+      if (buffer.indexOf("READY") != -1) {
+        Serial.printf("[SUCCESS] READY detected in buffer: %s\n", buffer.c_str());
         return true;
       }
 
-      // Clear buffer if it gets too long
-      if (response.length() > 100) {
-        response = response.substring(response.length() - 50);
+      // Prevent buffer overflow - keep only last 64 characters
+      if (buffer.length() > 64) {
+        buffer = buffer.substring(buffer.length() - 64);
       }
     }
     delay(10);
   }
 
-  Serial.printf("[TIMEOUT] No READY received (got: %s)\n", response.c_str());
+  Serial.printf("[TIMEOUT] No READY received after %dms (buffer: %s)\n", UART_TIMEOUT_MS, buffer.c_str());
   return false;
 }
 
@@ -353,6 +421,17 @@ String readCameraResponse(uint32_t timeout_ms) {
 void enterDeepSleep() {
   Serial.println("\n[WAIT] PIR sensor settling...");
   delay(PIR_SETTLE_TIME_MS);
+
+  // CRITICAL: Ensure camera stays OFF during deep sleep
+  // Set GPIO23 HIGH (camera OFF) and hold the state
+  digitalWrite(CAM_PWR_EN_PIN, HIGH);
+
+  // Try to hold GPIO state during deep sleep
+  // Hardware solution recommended: Add 10kΩ pull-up resistor from GPIO23 to 3.3V
+  gpio_hold_en((gpio_num_t)CAM_PWR_EN_PIN);
+  gpio_deep_sleep_hold_en();
+
+  Serial.println("[GPIO] Camera power pin held HIGH (OFF) for deep sleep");
 
   Serial.println("[SLEEP] Entering deep sleep mode...");
   Serial.println("         Waiting for PIR motion detection...");
