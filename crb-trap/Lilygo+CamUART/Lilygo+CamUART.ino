@@ -52,9 +52,10 @@
 #define I2C_SCL 22 // Default I2C SCL
 
 // ==================== UART CONFIGURATION ====================
-#define UART_BAUD_RATE 115200
-#define UART_TIMEOUT_MS 10000 // Timeout waiting for camera response (increased for boot time)
-#define CAM_BOOT_TIME_MS 2500 // Initial power-on delay (camera needs ~2s to boot and send READY)
+#define UART_BAUD_RATE 57600
+#define UART_RX_BUFFER_SIZE 16384 // 16KB RX buffer - prevents overflow during photo reception
+#define UART_TIMEOUT_MS 10000     // Timeout waiting for camera response (increased for boot time)
+#define CAM_BOOT_TIME_MS 2500     // Initial power-on delay (camera needs ~2s to boot and send READY)
 
 // ==================== PHOTO PARAMETERS ====================
 #define PHOTO_WIDTH 1600  // Image width in pixels
@@ -64,9 +65,22 @@
 // ==================== TIMING ====================
 #define CAMERA_ON_DURATION_MS 15000 // Max time camera stays on (15 seconds)
 #define PIR_SETTLE_TIME_MS 2000     // PIR sensor settle time
+#define PHOTO_MAX_RETRIES 3         // Retry photo on CRC failure (UART bit errors at 115200 baud)
 
 // UART Serial for camera communication
 HardwareSerial CameraSerial(2); // Use UART2 (GPIO16/17)
+
+// ==================== CRC32 CALCULATION ====================
+uint32_t calculateCRC32(uint8_t *data, uint32_t length) {
+  uint32_t crc = 0xFFFFFFFF;
+  for (uint32_t i = 0; i < length; i++) {
+    crc ^= data[i];
+    for (int j = 0; j < 8; j++) {
+      crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+    }
+  }
+  return crc ^ 0xFFFFFFFF;
+}
 
 // ==================== FUNCTION PROTOTYPES ====================
 void print_wakeup_reason();
@@ -74,6 +88,7 @@ uint16_t readLuxSensor();
 bool waitForCameraReady();
 bool sendPhotoCommand(uint16_t lux, uint16_t width, uint16_t height, uint8_t quality);
 String readCameraResponse(uint32_t timeout_ms);
+bool receivePhotoWithChecksum();
 void uartToCameraEnable();
 void uartToCameraDisable();
 void powerOnCamera();
@@ -115,10 +130,12 @@ void setup() {
   //   Serial.println("[I2C] ERROR: Light sensor not found!");
   // }
 
-  // Initialize UART to camera
+  // Initialize UART to camera with large RX buffer to prevent overflow during photo reception
+  CameraSerial.setRxBufferSize(UART_RX_BUFFER_SIZE);
   CameraSerial.begin(UART_BAUD_RATE, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
-  Serial.printf("[UART] Initialized on TX:%d RX:%d @ %d baud\n",
-                UART_TX_PIN, UART_RX_PIN, UART_BAUD_RATE);
+  CameraSerial.setTimeout(5000); // 5s per-byte timeout for readBytes() during binary photo reception
+  Serial.printf("[UART] Initialized on TX:%d RX:%d @ %d baud (RX buffer: %d bytes)\n",
+                UART_TX_PIN, UART_RX_PIN, UART_BAUD_RATE, UART_RX_BUFFER_SIZE);
 
   // ==================== HANDLE WAKEUP EVENT ====================
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
@@ -140,13 +157,34 @@ void setup() {
     if (waitForCameraReady()) {
       Serial.println("[UART] Camera is READY");
 
-      // Send photo command with parameters
-      bool success = sendPhotoCommand(luxValue, PHOTO_WIDTH, PHOTO_HEIGHT, PHOTO_QUALITY);
+      // Attempt photo capture with retry on CRC failure (UART bit errors)
+      bool photoSuccess = false;
+      for (int attempt = 1; attempt <= PHOTO_MAX_RETRIES && !photoSuccess; attempt++) {
+        if (attempt > 1) {
+          Serial.printf("\n[RETRY] Attempt %d/%d - flushing buffer and re-sending command...\n", attempt, PHOTO_MAX_RETRIES);
+          // Drain leftover data from previous failed attempt (e.g. OK:PHOTO_SENT)
+          delay(500);
+          while (CameraSerial.available())
+            CameraSerial.read();
+          delay(200);
+        }
 
-      if (success) {
-        Serial.println("[SUCCESS] Photo captured successfully!");
-      } else {
-        Serial.println("[ERROR] Photo capture failed!");
+        bool success = sendPhotoCommand(luxValue, PHOTO_WIDTH, PHOTO_HEIGHT, PHOTO_QUALITY);
+        if (success) {
+          Serial.println("[SUCCESS] Photo command sent, receiving photo...");
+          photoSuccess = receivePhotoWithChecksum();
+          if (photoSuccess) {
+            Serial.printf("[SUCCESS] Photo received and verified! (attempt %d/%d)\n", attempt, PHOTO_MAX_RETRIES);
+          } else {
+            Serial.printf("[ERROR] Photo reception failed on attempt %d/%d\n", attempt, PHOTO_MAX_RETRIES);
+          }
+        } else {
+          Serial.println("[ERROR] Photo command transmission failed!");
+        }
+      }
+
+      if (!photoSuccess) {
+        Serial.printf("[FAIL] All %d photo attempts failed!\n", PHOTO_MAX_RETRIES);
       }
 
     } else {
@@ -251,7 +289,9 @@ void uartToCameraEnable() {
   delay(100);
   pinMode(UART_TX_PIN, OUTPUT);
   pinMode(UART_RX_PIN, INPUT);
+  CameraSerial.setRxBufferSize(UART_RX_BUFFER_SIZE); // Ensure large RX buffer persists after end()/begin()
   CameraSerial.begin(UART_BAUD_RATE, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  CameraSerial.setTimeout(5000); // 5s per-byte timeout for readBytes()
   delay(50);
 
   // CRITICAL: Flush any garbage bytes from RX buffer
@@ -314,6 +354,7 @@ bool waitForCameraReady() {
   while (CameraSerial.available()) {
     CameraSerial.read();
   }
+  delay(100);
 
   uint32_t startTime = millis();
   String buffer = "";
@@ -332,6 +373,13 @@ bool waitForCameraReady() {
       // Check if READY is present anywhere in the buffer
       if (buffer.indexOf("READY") != -1) {
         Serial.printf("[SUCCESS] READY detected in buffer: %s\n", buffer.c_str());
+
+        // Critical: Flush ENTIRE buffer after READY found (consume remaining READY messages)
+        delay(200);
+        while (CameraSerial.available()) {
+          CameraSerial.read();
+        }
+
         return true;
       }
 
@@ -356,6 +404,13 @@ bool waitForCameraReady() {
  * @return true if OK received, false otherwise
  */
 bool sendPhotoCommand(uint16_t lux, uint16_t width, uint16_t height, uint8_t quality) {
+  // Critical: Flush RX buffer completely - consume all lingering READY data
+  delay(200);
+  while (CameraSerial.available()) {
+    CameraSerial.read();
+  }
+  delay(100);
+
   // Build command string
   char command[64];
   snprintf(command, sizeof(command), "PHOTO:%d:%d:%d:%d\n",
@@ -364,25 +419,184 @@ bool sendPhotoCommand(uint16_t lux, uint16_t width, uint16_t height, uint8_t qua
   Serial.printf("[UART] Sending command: %s", command);
   CameraSerial.print(command);
   CameraSerial.flush();
+  delay(100); // Brief delay for slave to parse command (photo capture takes time anyway)
 
-  // Wait for response
-  Serial.println("[UART] Waiting for confirmation...");
-  String response = readCameraResponse(UART_TIMEOUT_MS);
+  Serial.println("[UART] Command sent, slave should begin photo transmission");
+  return true;
+}
 
-  if (response.startsWith("OK:")) {
-    String filename = response.substring(3);
-    filename.trim();
-    Serial.printf("[SUCCESS] Photo saved as: %s\n", filename.c_str());
-    return true;
-  } else if (response.startsWith("ERROR:")) {
-    String error = response.substring(6);
-    error.trim();
-    Serial.printf("[ERROR] Camera error: %s\n", error.c_str());
-    return false;
-  } else {
-    Serial.printf("[ERROR] Unexpected response: %s\n", response.c_str());
-    return false;
+bool receivePhotoWithChecksum() {
+  Serial.println("[PHOTO] Waiting for photo transmission...");
+  // No delay here - start reading immediately to avoid missing early bytes
+
+  uint32_t startTime = millis();
+  String buffer = "";
+  uint32_t photoSize = 0;
+  uint32_t receivedCRC = 0;
+  uint8_t *photoData = nullptr;
+  uint32_t bytesReceived = 0;
+  uint32_t lastDataTime = millis();
+  uint32_t lastProgressLog = 0; // Track progress logging threshold (local, resets on retry)
+
+  // Timeout: 60s absolute, 15s with no data after receiving started
+  const uint32_t ABSOLUTE_TIMEOUT_MS = 60000;
+  const uint32_t NO_DATA_TIMEOUT_MS = 15000;
+
+  enum State {
+    WAITING_START,
+    READING_SIZE,
+    READING_DATA,
+    READING_CRC,
+    WAITING_END
+  };
+  State state = WAITING_START;
+
+  while (millis() - startTime < ABSOLUTE_TIMEOUT_MS) {
+    // Check "no data" timeout - if we've started receiving but data stops flowing
+    if (state >= READING_DATA && (millis() - lastDataTime > NO_DATA_TIMEOUT_MS)) {
+      Serial.printf("[ERROR] No data received for %dms, aborting\n", NO_DATA_TIMEOUT_MS);
+      break;
+    }
+
+    // Inner loop: Read ALL available data without delay (CRITICAL for binary data)
+    bool hadData = false;
+
+    // Use bulk read for READING_DATA state to minimize per-byte overhead
+    if (state == READING_DATA && photoData) {
+      int avail = CameraSerial.available();
+      if (avail > 0) {
+        hadData = true;
+        lastDataTime = millis();
+
+        // Read as many bytes as possible in bulk (up to remaining needed)
+        uint32_t remaining = photoSize - bytesReceived;
+        uint32_t toRead = (avail < (int)remaining) ? avail : remaining;
+        size_t actualRead = CameraSerial.readBytes(photoData + bytesReceived, toRead);
+        bytesReceived += actualRead;
+
+        // Log progress every 10000 bytes (reduced frequency to minimize Serial blocking)
+        if (bytesReceived / 10000 > lastProgressLog) {
+          lastProgressLog = bytesReceived / 10000;
+          Serial.printf("[PHOTO] Progress: %u/%u bytes received (%d%%) at %ldms\n",
+                        bytesReceived, photoSize,
+                        (int)(bytesReceived * 100 / photoSize),
+                        millis() - startTime);
+        }
+
+        if (bytesReceived >= photoSize) {
+          Serial.printf("[PHOTO] Received %u bytes of JPEG data (total time: %ldms)\n",
+                        bytesReceived, millis() - startTime);
+          state = READING_CRC;
+          buffer = "";
+        }
+      }
+    } else {
+      // For non-data states, read byte-by-byte to parse protocol markers
+      while (CameraSerial.available()) {
+        hadData = true;
+        lastDataTime = millis();
+        char c = CameraSerial.read();
+
+        if (state == WAITING_START) {
+          if (c >= 32 && c <= 126) {
+            buffer += c;
+          }
+
+          if (buffer.indexOf("<PHOTO_START>") != -1) {
+            Serial.println("[PHOTO] Start marker detected");
+            state = READING_SIZE;
+            buffer = "";
+          }
+
+          // Prevent buffer overflow
+          if (buffer.length() > 64) {
+            buffer = buffer.substring(buffer.length() - 32);
+          }
+        }
+
+        else if (state == READING_SIZE) {
+          if (c == '\n') {
+            if (buffer.startsWith("SIZE:")) {
+              photoSize = buffer.substring(5).toInt();
+              Serial.printf("[DEBUG] SIZE buffer: '%s', parsed size: %u bytes\n", buffer.c_str(), photoSize);
+              if (photoSize > 0 && photoSize < 500000) { // Max 500KB
+                Serial.printf("[PHOTO] Size: %u bytes\n", photoSize);
+                photoData = (uint8_t *)malloc(photoSize);
+                if (photoData) {
+                  state = READING_DATA;
+                  bytesReceived = 0;
+                  buffer = "";
+                  break; // Exit inner loop to use bulk read path above
+                } else {
+                  Serial.println("[ERROR] Memory allocation failed");
+                  return false;
+                }
+              } else {
+                Serial.printf("[ERROR] Invalid photo size: %u\n", photoSize);
+                return false;
+              }
+            }
+          } else if (c >= 32 && c <= 126) {
+            buffer += c;
+          }
+        }
+
+        else if (state == READING_CRC) {
+          if (c == '\n') {
+            if (buffer.startsWith("CRC32:")) {
+              char crcStr[20];
+              buffer.substring(6).toCharArray(crcStr, sizeof(crcStr));
+              receivedCRC = strtoul(crcStr, nullptr, 16);
+              Serial.printf("[PHOTO] Received CRC32: %08X\n", receivedCRC);
+              state = WAITING_END;
+              buffer = "";
+            }
+          } else if (c >= 32 && c <= 126) {
+            buffer += c;
+          }
+        }
+
+        else if (state == WAITING_END) {
+          if (c >= 32 && c <= 126) {
+            buffer += c;
+          }
+
+          if (buffer.indexOf("<PHOTO_END>") != -1) {
+            Serial.println("[PHOTO] End marker detected");
+
+            // Verify CRC32
+            uint32_t calculatedCRC = calculateCRC32(photoData, photoSize);
+            Serial.printf("[PHOTO] Calculated CRC32: %08X\n", calculatedCRC);
+
+            if (calculatedCRC == receivedCRC) {
+              Serial.println("[PHOTO] CRC32 VERIFIED - Photo is intact!");
+              Serial.printf("[PHOTO] SUCCESS: Received %u bytes, CRC32 match\n", photoSize);
+              free(photoData);
+              return true;
+            } else {
+              Serial.printf("[ERROR] CRC32 mismatch! Got %08X, expected %08X\n", calculatedCRC, receivedCRC);
+              free(photoData);
+              return false;
+            }
+          }
+        }
+      }
+    }
+
+    // Only yield briefly if no data was available, to avoid busy-looping the CPU
+    // Use yield() instead of delay(1) to minimize latency while still feeding the watchdog
+    if (!hadData) {
+      yield();                // Feed watchdog without long delay
+      delayMicroseconds(100); // Sub-millisecond wait to prevent tight CPU spin
+    }
   }
+
+  Serial.println("[ERROR] Photo reception timeout");
+  Serial.printf("[DEBUG] Timeout details: state=%d, bytesReceived=%u, photoSize=%u, elapsed=%ldms, lastDataAt=%ldms\n",
+                (int)state, bytesReceived, photoSize, millis() - startTime, millis() - lastDataTime);
+  if (photoData)
+    free(photoData);
+  return false;
 }
 
 /**

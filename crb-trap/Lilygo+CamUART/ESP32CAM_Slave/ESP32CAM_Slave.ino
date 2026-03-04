@@ -5,9 +5,9 @@
 
 #include "Arduino.h"
 #include "EEPROM.h"
-#include "FS.h"
-#include "SD_MMC.h"
 #include "esp_camera.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "soc/rtc_cntl_reg.h"
 #include "soc/soc.h"
 
@@ -38,8 +38,9 @@
 #define UART_TX_PIN 13 // GPIO13 → LilyGo RX (NOTE: conflicts with SD D3 in 4-bit mode)
 
 // ==================== UART CONFIGURATION ====================
-#define UART_BAUD_RATE 115200
+#define UART_BAUD_RATE 57600
 #define CMD_BUFFER_SIZE 128
+#define CMD_MAX_WAIT_MS 30000
 
 // ==================== EEPROM CONFIGURATION ====================
 #define EEPROM_SIZE 1 // 1 byte for photo counter (0-255)
@@ -48,43 +49,91 @@
 HardwareSerial MasterSerial(2);
 
 // ==================== GLOBAL VARIABLES ====================
-uint8_t pictureNumber = 1;      // store as byte (0-255)
+uint8_t pictureNumber = 1; // store as byte (0-255)
 bool cameraInitialized = false;
-bool sdCardInitialized = false;
+char commandBuffer[CMD_BUFFER_SIZE] = {0}; // Use fixed buffer instead of String to avoid heap fragmentation
+volatile int commandBufferPos = 0;
+volatile uint32_t lastCommandTime = 0;
+volatile bool uartReady = false;
+static bool uartInitialized = false;   // Track if UART init has been done in loop()
+static bool commandInProgress = false; // Guard against duplicate command processing
 
-// ==================== HELPERS ====================
-static bool sdWriteTest() {
-  File t = SD_MMC.open("/test.txt", FILE_WRITE);
-  if (!t) return false;
-  t.println("sd write ok");
-  t.close();
-  return true;
+// ==================== CRC32 CALCULATION ====================
+uint32_t calculateCRC32(uint8_t *data, uint32_t length) {
+  uint32_t crc = 0xFFFFFFFF;
+  for (uint32_t i = 0; i < length; i++) {
+    crc ^= data[i];
+    for (int j = 0; j < 8; j++) {
+      crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+    }
+  }
+  return crc ^ 0xFFFFFFFF;
 }
 
+// ==================== HELPERS ====================
 static framesize_t selectFrameSize(uint16_t width, uint16_t height) {
-  if (width >= 1600 || height >= 1200) return FRAMESIZE_UXGA;
-  if (width >= 1280 || height >= 1024) return FRAMESIZE_SXGA;
-  if (width >= 1024 || height >= 768)  return FRAMESIZE_XGA;
-  if (width >= 800  || height >= 600)  return FRAMESIZE_SVGA;
+  if (width >= 1600 || height >= 1200)
+    return FRAMESIZE_UXGA;
+  if (width >= 1280 || height >= 1024)
+    return FRAMESIZE_SXGA;
+  if (width >= 1024 || height >= 768)
+    return FRAMESIZE_XGA;
+  if (width >= 800 || height >= 600)
+    return FRAMESIZE_SVGA;
   return FRAMESIZE_VGA;
 }
 
+static void initializeSCCBBus() {
+  // Reset I2C bus (SCCB protocol) used by camera sensor
+  // This prevents stuck bus lines after crashes
+  Serial.println("[CAM] Initializing I2C SCCB bus...");
+  pinMode(SIOD_GPIO_NUM, OUTPUT);
+  pinMode(SIOC_GPIO_NUM, OUTPUT);
+  digitalWrite(SIOD_GPIO_NUM, HIGH);
+  digitalWrite(SIOC_GPIO_NUM, HIGH);
+  delay(10);
+
+  // Send STOP condition (9 clock pulses with SDA low at end)
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(SIOC_GPIO_NUM, LOW);
+    delay(2);
+    digitalWrite(SIOC_GPIO_NUM, HIGH);
+    delay(2);
+  }
+
+  // Final STOP condition
+  digitalWrite(SIOD_GPIO_NUM, LOW);
+  delay(2);
+  digitalWrite(SIOD_GPIO_NUM, HIGH);
+  delay(2);
+
+  Serial.println("[CAM] I2C bus reset complete");
+}
+
 static uint8_t calculateFlashBrightness(uint16_t lux) {
-  if (lux < 50)  return 255;
-  if (lux < 150) return 192;
-  if (lux < 300) return 128;
-  if (lux < 500) return 64;
+  if (lux < 50)
+    return 255;
+  if (lux < 150)
+    return 192;
+  if (lux < 300)
+    return 128;
+  if (lux < 500)
+    return 64;
   return 0;
 }
 
 static void setFlashBrightness(uint8_t brightness) {
   if (brightness > 0) {
-    ledcAttach(FLASH_LED_PIN, 5000, 8);
-    ledcWrite(FLASH_LED_PIN, brightness);
-    Serial.printf("[LED] Flash brightness set to %d/255\n", brightness);
+    // Simple LED control - just turn on for bright environments
+    if (FLASH_LED_PIN >= 0) {
+      digitalWrite(FLASH_LED_PIN, HIGH); // Turn on flash
+      Serial.printf("[LED] Flash ON (level %d/255)\n", brightness);
+    }
   } else {
-    ledcDetach(FLASH_LED_PIN);
-    digitalWrite(FLASH_LED_PIN, LOW);
+    // Turn off flash
+    if (FLASH_LED_PIN >= 0) {
+      digitalWrite(FLASH_LED_PIN, LOW);
+    }
     Serial.println("[LED] Flash OFF");
   }
 }
@@ -95,9 +144,9 @@ void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
   Serial.begin(115200);
-  delay(100);
+  delay(500); // More stable startup - wait longer for Serial to stabilize
 
-  Serial.println("\n===========================================");
+  Serial.println("\n\n===========================================");
   Serial.println("ESP32-CAM UART Slave");
   Serial.println("===========================================");
   Serial.println("[INIT] Brownout detector disabled");
@@ -108,38 +157,9 @@ void setup() {
   pictureNumber = (stored == 255) ? 1 : (uint8_t)(stored + 1);
   Serial.printf("[EEPROM] Picture number: %d\n", pictureNumber);
 
-  // SD Card (FORCE 1-BIT MODE to avoid GPIO4/GPIO13 conflicts)
-  Serial.println("[SD] Starting SD Card (forced 1-bit mode)...");
-  if (!SD_MMC.begin("/sdcard", true)) {   // true = 1-bit mode
-    Serial.println("[SD] ERROR: SD Card Mount Failed");
-    delay(1000);
-    ESP.restart();
-  }
-
-  uint8_t cardType = SD_MMC.cardType();
-  if (cardType == CARD_NONE) {
-    Serial.println("[SD] ERROR: No SD Card attached");
-    delay(1000);
-    ESP.restart();
-  }
-
-  Serial.print("[SD] Card Type: ");
-  if (cardType == CARD_MMC) Serial.println("MMC");
-  else if (cardType == CARD_SD) Serial.println("SDSC");
-  else if (cardType == CARD_SDHC) Serial.println("SDHC");
-  else Serial.println("UNKNOWN");
-
-  sdCardInitialized = true;
-
-  // Quick SD write sanity test
-  if (!sdWriteTest()) {
-    Serial.println("[SD] ERROR: Write test failed (test.txt cannot be created)");
-    Serial.println("[SD] Likely causes: power droop, card not FAT32, or still pin conflict.");
-    delay(1000);
-    ESP.restart();
-  } else {
-    Serial.println("[SD] Write test OK (test.txt created/appended)");
-  }
+  // Reset and initialize I2C bus BEFORE camera init
+  initializeSCCBBus();
+  delay(500);
 
   // Camera init
   camera_config_t config;
@@ -166,12 +186,12 @@ void setup() {
 
   if (psramFound()) {
     Serial.println("[CAM] PSRAM found");
-    config.frame_size = FRAMESIZE_XGA;
-    config.jpeg_quality = 12;
+    config.frame_size = FRAMESIZE_SXGA; // Reduced from UXGA to avoid memory issues
+    config.jpeg_quality = 12;           // Standard quality
     config.fb_count = 1;
   } else {
     Serial.println("[CAM] PSRAM not found");
-    config.frame_size = FRAMESIZE_VGA;
+    config.frame_size = FRAMESIZE_VGA; // Reduced for no-PSRAM boards
     config.jpeg_quality = 15;
     config.fb_count = 1;
   }
@@ -193,51 +213,101 @@ void setup() {
   pinMode(FLASH_LED_PIN, OUTPUT);
   digitalWrite(FLASH_LED_PIN, LOW);
 
-  MasterSerial.begin(UART_BAUD_RATE, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
-  Serial.printf("[UART] Initialized on RX:%d TX:%d @ %d baud\n",
-                UART_RX_PIN, UART_TX_PIN, UART_BAUD_RATE);
-
-  delay(300);
-
-  // READY framed, double-sent
-  MasterSerial.print("<READY>\n");
-  MasterSerial.flush();
-  delay(100);
-  MasterSerial.print("<READY>\n");
-  MasterSerial.flush();
-
-  Serial.println("[UART] Sent READY signal to master (framed, double-sent)");
-  Serial.println("[STATUS] Waiting for commands...");
+  Serial.println("[STATUS] Setup complete, deferring UART init to loop...");
   Serial.println("===========================================\n");
 }
 
-// ==================== PHOTO CAPTURE ====================
-static bool captureAndSavePhoto(uint16_t lux, uint16_t width, uint16_t height, uint8_t quality) {
-  if (!cameraInitialized) {
-    Serial.println("[CAM] ERROR: Camera not initialized");
+// ==================== SEND PHOTO VIA UART ====================
+bool sendPhotoViaUART(camera_fb_t *fb) {
+  if (!fb) {
+    Serial.println("[UART] ERROR: No frame buffer");
     return false;
   }
-  if (!sdCardInitialized) {
-    Serial.println("[SD] ERROR: SD not initialized");
+
+  if (!uartReady) {
+    Serial.println("[UART] ERROR: UART not ready");
+    return false;
+  }
+
+  // Calculate CRC32 of photo data
+  uint32_t crc32 = calculateCRC32(fb->buf, fb->len);
+  Serial.printf("[UART] CRC32: %08X\n", crc32);
+
+  // Send start marker
+  if (MasterSerial.print("<PHOTO_START>\n") == 0) {
+    Serial.println("[UART] ERROR: Failed to send START marker");
+    return false;
+  }
+  Serial.println("[UART] Sent: <PHOTO_START>");
+  MasterSerial.flush();
+
+  // Send size
+  if (MasterSerial.printf("SIZE:%u\n", fb->len) == 0) {
+    Serial.println("[UART] ERROR: Failed to send SIZE");
+    return false;
+  }
+  Serial.printf("[UART] Sent: SIZE:%u\n", fb->len);
+  MasterSerial.flush();
+
+  // Send JPEG binary data in chunks with flow control
+  // Larger chunks = fewer flush() calls = faster transfer
+  const size_t chunkSize = 256; // 256 bytes per chunk - balances speed vs buffer safety
+  size_t totalSent = 0;
+
+  while (totalSent < fb->len) {
+    size_t toSend = (fb->len - totalSent > chunkSize) ? chunkSize : (fb->len - totalSent);
+    size_t written = MasterSerial.write(fb->buf + totalSent, toSend);
+    if (written != toSend) {
+      Serial.printf("[UART] ERROR: Expected to send %u bytes, but sent %u\n", toSend, written);
+      return false;
+    }
+    totalSent += written;
+    MasterSerial.flush(); // Wait for TX buffer to empty before sending next chunk
+    // No additional delay needed - flush() already waits for hardware TX completion
+  }
+
+  Serial.printf("[UART] Sent %u bytes of JPEG data\n", totalSent);
+
+  // Send CRC32
+  if (MasterSerial.printf("CRC32:%08X\n", crc32) == 0) {
+    Serial.println("[UART] ERROR: Failed to send CRC32");
+    return false;
+  }
+  Serial.printf("[UART] Sent: CRC32:%08X\n", crc32);
+  MasterSerial.flush();
+
+  // Send end marker
+  if (MasterSerial.print("<PHOTO_END>\n") == 0) {
+    Serial.println("[UART] ERROR: Failed to send END marker");
+    return false;
+  }
+  Serial.println("[UART] Sent: <PHOTO_END>");
+  MasterSerial.flush();
+
+  return true;
+}
+
+// ==================== PHOTO CAPTURE ====================
+bool captureAndSendPhoto(uint16_t lux, uint16_t width, uint16_t height, uint8_t quality) {
+
+  if (!cameraInitialized) {
+    Serial.println("[ERROR] Camera not initialized");
     return false;
   }
 
   sensor_t *s = esp_camera_sensor_get();
   if (!s) {
-    Serial.println("[CAM] ERROR: No sensor");
+    Serial.println("[CAM] ERROR: Failed to get sensor");
     return false;
   }
 
-  framesize_t frameSize = selectFrameSize(width, height);
-  s->set_framesize(s, frameSize);
-  Serial.printf("[CAM] Frame size request: %dx%d\n", width, height);
-
+  // Configure for requested quality and size
+  s->set_framesize(s, selectFrameSize(width, height));
   s->set_quality(s, quality);
-  Serial.printf("[CAM] JPEG quality set to %d\n", quality);
+  Serial.printf("[CAM] Settings → Size:%dx%d, Quality:%d\n", width, height, quality);
 
+  // Flash based on LUX
   uint8_t flashBrightness = calculateFlashBrightness(lux);
-  Serial.printf("[FLASH] LUX=%d → Brightness=%d/255\n", lux, flashBrightness);
-
   if (flashBrightness > 0) {
     setFlashBrightness(flashBrightness);
     delay(200);
@@ -248,94 +318,66 @@ static bool captureAndSavePhoto(uint16_t lux, uint16_t width, uint16_t height, u
 
   for (int retry = 0; retry < 3; retry++) {
     fb = esp_camera_fb_get();
-    if (fb) break;
+    if (fb)
+      break;
     Serial.printf("[CAM] Capture failed, retry %d\n", retry + 1);
-    delay(500);
+    delay(300);
   }
 
-  if (flashBrightness > 0) setFlashBrightness(0);
+  // Turn off flash
+  if (flashBrightness > 0) {
+    setFlashBrightness(0);
+  }
 
   if (!fb) {
-    Serial.println("[CAM] ERROR: Capture failed after retries");
+    Serial.println("[CAM] ERROR: Capture failed");
     return false;
   }
 
-  Serial.printf("[CAM] Image captured: %zu bytes\n", fb->len);
+  Serial.printf("[CAM] Image captured: %u bytes\n", fb->len);
 
-  char filename[32];
-  snprintf(filename, sizeof(filename), "/image%u.jpg", pictureNumber);
-
-  // Prepare next counter (wrap)
-  uint8_t next = (pictureNumber == 255) ? 1 : (uint8_t)(pictureNumber + 1);
-  EEPROM.write(0, next);
-  EEPROM.commit();
-  Serial.printf("[EEPROM] Counter updated: %u\n", next);
-
-  Serial.printf("[SD] Saving to %s...\n", filename);
-  File file = SD_MMC.open(filename, FILE_WRITE);
-
-  if (!file) {
-    Serial.println("[SD] ERROR: Failed to open file for writing");
-    esp_camera_fb_return(fb);
-    return false;
-  }
-
-  const size_t totalBytes = fb->len;
-  size_t bytesWritten = 0;
-  const size_t chunkSize = 1024;
-
-  while (bytesWritten < totalBytes) {
-    size_t toWrite = min(chunkSize, totalBytes - bytesWritten);
-    size_t written = file.write(fb->buf + bytesWritten, toWrite);
-    if (written != toWrite) {
-      Serial.printf("[SD] ERROR: Write failed at %zu bytes\n", bytesWritten);
-      break;
-    }
-    bytesWritten += written;
-  }
-
-  file.close();
+  // Send via UART
+  bool success = sendPhotoViaUART(fb);
   esp_camera_fb_return(fb);
 
-  if (bytesWritten != totalBytes) {
-    Serial.printf("[SD] ERROR: Write incomplete (%zu/%zu)\n", bytesWritten, totalBytes);
-    return false;
+  if (success) {
+    MasterSerial.println("OK:PHOTO_SENT");
+    Serial.println("[UART] Photo transmission complete");
+  } else {
+    MasterSerial.println("ERROR:SEND_FAILED");
+    Serial.println("[UART] Photo transmission failed");
   }
 
-  Serial.printf("[SD] SUCCESS: %s saved (%zu bytes)\n", filename, bytesWritten);
-
-  // advance pictureNumber only after success
-  pictureNumber = next;
-
-  char response[64];
-  snprintf(response, sizeof(response), "OK:%s", filename);
-  MasterSerial.println(response);
-  Serial.printf("[UART] Sent: %s\n", response);
-  return true;
+  return success;
 }
 
 // ==================== COMMAND HANDLING ====================
-static void processCommand(String command) {
-  if (!command.startsWith("PHOTO:")) {
-    Serial.printf("[ERROR] Unknown command: %s\n", command.c_str());
+static void processCommand(char *command) {
+  if (!uartReady) {
+    Serial.println("[ERROR] UART not ready");
+    return;
+  }
+
+  // Guard against duplicate processing (UART buffer can contain the same command twice)
+  if (commandInProgress) {
+    Serial.println("[WARN] Command already in progress, ignoring duplicate");
+    return;
+  }
+  commandInProgress = true;
+
+  if (strncmp(command, "PHOTO:", 6) != 0) {
+    Serial.printf("[ERROR] Unknown command: %s\n", command);
     MasterSerial.println("ERROR:Unknown command");
     return;
   }
 
-  int idx1 = command.indexOf(':', 6);
-  int idx2 = command.indexOf(':', idx1 + 1);
-  int idx3 = command.indexOf(':', idx2 + 1);
-
-  if (idx1 <= 0 || idx2 <= 0 || idx3 <= 0) {
+  // Parse PHOTO:lux:width:height:quality
+  int lux = 0, width = 0, height = 0, quality = 0;
+  if (sscanf(command, "PHOTO:%d:%d:%d:%d", &lux, &width, &height, &quality) != 4) {
     Serial.println("[ERROR] Invalid command format");
     MasterSerial.println("ERROR:Invalid format");
     return;
   }
-
-  uint16_t lux = command.substring(6, idx1).toInt();
-  uint16_t width = command.substring(idx1 + 1, idx2).toInt();
-  uint16_t height = command.substring(idx2 + 1, idx3).toInt();
-  uint8_t quality = command.substring(idx3 + 1).toInt();
 
   Serial.printf("[PARSE] LUX=%d, Size=%dx%d, Quality=%d\n", lux, width, height, quality);
 
@@ -350,31 +392,99 @@ static void processCommand(String command) {
     return;
   }
 
-  if (!captureAndSavePhoto(lux, width, height, quality)) {
+  if (!captureAndSendPhoto((uint16_t)lux, (uint16_t)width, (uint16_t)height, (uint8_t)quality)) {
     MasterSerial.println("ERROR:Capture failed");
   }
+
+  // Flush any remaining bytes in the RX buffer that arrived while we were busy
+  while (MasterSerial.available()) {
+    MasterSerial.read();
+  }
+
+  commandInProgress = false;
 }
 
 // ==================== LOOP ====================
 void loop() {
-  static String commandBuffer = "";
+  // Initialize UART on first loop() call - safe in loop context
+  if (!uartInitialized) {
+    Serial.println("\n[UART] Initializing Master Serial (UART2) in loop()...");
 
-  while (MasterSerial.available()) {
-    char c = (char)MasterSerial.read();
-    commandBuffer += c;
+    // Start UART
+    MasterSerial.begin(UART_BAUD_RATE, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+    delay(200);
 
-    if (c == '\n') {
-      commandBuffer.trim();
-      Serial.printf("[UART] Received: %s\n", commandBuffer.c_str());
-      processCommand(commandBuffer);
-      commandBuffer = "";
+    // Clear any garbage
+    while (MasterSerial.available()) {
+      MasterSerial.read();
     }
 
-    if (commandBuffer.length() > CMD_BUFFER_SIZE) {
-      Serial.println("[ERROR] Command buffer overflow!");
-      commandBuffer = "";
+    Serial.printf("[UART] Initialized on RX:%d TX:%d @ %d baud\n",
+                  UART_RX_PIN, UART_TX_PIN, UART_BAUD_RATE);
+
+    delay(300);
+
+    // Send READY signal
+    MasterSerial.print("<READY>\n");
+    MasterSerial.flush();
+    delay(150);
+    MasterSerial.print("<READY>\n");
+    MasterSerial.flush();
+    Serial.println("[UART] Sent READY signal to master");
+
+    // Initialize command buffer
+    commandBufferPos = 0;
+    lastCommandTime = millis();
+
+    // Mark UART ready
+    uartReady = true;
+    uartInitialized = true;
+
+    Serial.println("[STATUS] Waiting for commands...\n");
+    delay(500);
+    return;
+  }
+
+  // Normal loop operation
+  if (!uartReady) {
+    delay(100);
+    return;
+  }
+
+  // Sanity check on buffer position
+  if (commandBufferPos < 0 || commandBufferPos >= CMD_BUFFER_SIZE) {
+    commandBufferPos = 0;
+  }
+
+  // Check UART for incoming data (non-blocking)
+  int avail = MasterSerial.available();
+  if (avail <= 0) {
+    delay(10);
+    return;
+  }
+
+  // Read bytes available, but limit to prevent overflow
+  while (avail > 0 && commandBufferPos < (CMD_BUFFER_SIZE - 1)) {
+    int inByte = MasterSerial.read();
+    avail--;
+
+    if (inByte < 0)
+      break;
+
+    char c = (char)inByte;
+
+    if (c == '\n' || c == '\r') {
+      if (commandBufferPos > 0) {
+        commandBuffer[commandBufferPos] = '\0';
+        Serial.printf("[UART] Received %d bytes: %s\n", commandBufferPos, commandBuffer);
+        processCommand(commandBuffer);
+        commandBufferPos = 0;
+      }
+    } else if (c >= 32 && c <= 126) {
+      commandBuffer[commandBufferPos] = c;
+      commandBufferPos++;
     }
   }
 
-  delay(10);
+  delay(2);
 }
