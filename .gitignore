@@ -6,3 +6,5 @@ build
 extras
 images/product/jpeg/*
 
+nul
+.env
