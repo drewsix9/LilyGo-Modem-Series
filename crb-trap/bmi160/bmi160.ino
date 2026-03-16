@@ -1,6 +1,6 @@
 #include <DFRobot_BMI160.h>
-#include <Wire.h>
 #include <Math.h>
+#include <Wire.h>
 
 DFRobot_BMI160 bmi160;
 const int8_t i2c_addr = 0x68;
@@ -18,14 +18,16 @@ void setup() {
 
   if (bmi160.softReset() != BMI160_OK) {
     Serial.println("reset false");
-    while (1);
+    while (1)
+      ;
   }
 
   if (bmi160.I2cInit(i2c_addr) != BMI160_OK) {
     Serial.println("init false");
-    while (1);
+    while (1)
+      ;
   }
-  
+
   lastTime = millis();
 }
 
@@ -54,12 +56,16 @@ void loop() {
     yaw += gz * dt * 180 / 3.14;
 
     // Print pitch, roll, and yaw
-    Serial.print(pitch); Serial.print(",");
-    Serial.print(roll); Serial.print(",");
-    Serial.println(yaw);
+    Serial.print(pitch);
+    Serial.print(",");
+    Serial.print(roll);
+    Serial.print(",");
+    Serial.print(yaw);
+    Serial.print("FALLEN: ");
+    Serial.println((fabs(roll) >= 70.0 && fabs(roll) <= 90) ? "NO" : "YES");
   } else {
     Serial.println("err");
   }
-  
+
   delay(10);
 }
