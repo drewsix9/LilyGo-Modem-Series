@@ -31,9 +31,9 @@
 #include <driver/gpio.h>
 
 // ==================== PHOTO PARAMETERS ====================
-#define PHOTO_WIDTH 640  // Requested capture width  (pixels)
-#define PHOTO_HEIGHT 480 // Requested capture height (pixels)
-#define PHOTO_QUALITY 10 // JPEG quality: 1–63 (lower = better quality)
+#define PHOTO_WIDTH 640  // Requested capture width  (pixels) — native VGA
+#define PHOTO_HEIGHT 480 // Requested capture height (pixels) — native VGA
+#define PHOTO_QUALITY 30 // JPEG quality: 1–63 (lower = better quality)
 
 // ==================== TIMING ====================
 #define CAM_BOOT_TIME_MS 2500 // Camera power-on to WiFi-ready delay (ms)
@@ -61,6 +61,10 @@ void setup() {
   digitalWrite(CAM_PWR_EN_PIN, HIGH); // Camera OFF initially
   Serial.println("[GPIO] GPIO23 configured with maximum drive strength");
 
+  // Log initial memory status
+  Serial.printf("[MEMORY] Initial: Free PSRAM: %u bytes, Free heap: %u bytes\n",
+                ESP.getFreePsram(), ESP.getFreeHeap());
+
   // Start I2C for light sensor
   Wire.begin(SENSOR_I2C_SDA, SENSOR_I2C_SCL);
   bool sensorsReady = initSensors();
@@ -81,6 +85,10 @@ void setup() {
     Serial.printf("[SENSOR] Current light intensity: %d LUX\n", luxValue);
     Serial.print("[SENSOR] Fall status: ");
     Serial.println(isFallen ? "FALLEN" : "NOT FALLEN");
+
+    // Log memory before camera power on
+    Serial.printf("[MEMORY] Before camera: Free PSRAM: %u bytes, Free heap: %u bytes\n",
+                  ESP.getFreePsram(), ESP.getFreeHeap());
 
     // Start WiFi AP + ESP-NOW before powering camera so slave can find us
     initESPNOW();
@@ -114,8 +122,12 @@ void setup() {
         }
 
         if (sendPhotoCommand(luxValue, PHOTO_WIDTH, PHOTO_HEIGHT, PHOTO_QUALITY)) {
+          Serial.printf("[MEMORY] Before photo RX: Free PSRAM: %u bytes, Free heap: %u bytes\n",
+                        ESP.getFreePsram(), ESP.getFreeHeap());
           Serial.println("[SUCCESS] Photo command sent, receiving photo...");
           photoSuccess = receivePhoto();
+          Serial.printf("[MEMORY] After photo RX: Free PSRAM: %u bytes, Free heap: %u bytes\n",
+                        ESP.getFreePsram(), ESP.getFreeHeap());
           if (photoSuccess) {
             Serial.printf("[SUCCESS] Photo received and verified! (attempt %d/%d)\n",
                           attempt, PHOTO_MAX_RETRIES);
@@ -161,6 +173,8 @@ void setup() {
   Serial.printf("  - Master AP:     %s (channel %d)\n", MASTER_AP_SSID, ESPNOW_CHANNEL);
   Serial.printf("  - Photo size:    %dx%d, Quality: %d\n",
                 PHOTO_WIDTH, PHOTO_HEIGHT, PHOTO_QUALITY);
+  Serial.printf("[MEMORY] Before sleep: Free PSRAM: %u bytes, Free heap: %u bytes\n",
+                ESP.getFreePsram(), ESP.getFreeHeap());
 
   enterDeepSleep();
 }

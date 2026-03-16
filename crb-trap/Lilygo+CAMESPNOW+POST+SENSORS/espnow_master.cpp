@@ -74,14 +74,19 @@ static void handleRecvData(const uint8_t *mac_addr, const uint8_t *data, int dat
         photoBuffer = nullptr;
       }
       if (photoSize > 0 && photoSize < 500000) {
+        Serial.printf("[ESPNOW] Before buffer alloc: Free PSRAM: %u, Free heap: %u\n",
+                      ESP.getFreePsram(), ESP.getFreeHeap());
         photoBuffer = (uint8_t *)malloc(photoSize);
         if (photoBuffer) {
+          Serial.printf("[ESPNOW] After buffer alloc: Free PSRAM: %u, Free heap: %u\n",
+                        ESP.getFreePsram(), ESP.getFreeHeap());
           memset(photoBuffer, 0, photoSize);
           packetsReceived = 0;
           photoStartReceived = true;
           Serial.printf("[ESPNOW] Buffer allocated: %u bytes\n", photoSize);
         } else {
-          Serial.println("[ESPNOW] ERROR: malloc failed!");
+          Serial.printf("[ESPNOW] ERROR: malloc failed! Needed: %u, Free PSRAM: %u, Free heap: %u\n",
+                        photoSize, ESP.getFreePsram(), ESP.getFreeHeap());
         }
       } else {
         Serial.printf("[ESPNOW] ERROR: Invalid photo size: %u\n", photoSize);
