@@ -29,7 +29,6 @@ extern volatile bool photoStartReceived;
 extern volatile bool photoEndReceived;
 extern volatile bool slaveError;
 extern volatile uint8_t slaveErrorCode;
-extern volatile bool transferAborted; // NEW: Abort flag for sequencing errors
 
 extern uint8_t *photoBuffer;
 extern volatile uint32_t photoSize;
@@ -37,7 +36,6 @@ extern volatile uint16_t totalPacketsExpected;
 extern volatile uint16_t packetsReceived;
 extern volatile uint32_t receivedCRC32;
 extern volatile uint32_t lastPacketTime;
-extern volatile uint16_t lastAckedPacket; // NEW: Track last acked packet for handshake
 
 extern uint8_t slaveMac[6];
 extern bool slavePaired;

@@ -22,8 +22,6 @@ volatile bool photoStartReceived = false;
 volatile bool photoEndReceived = false;
 volatile bool slaveError = false;
 volatile uint8_t slaveErrorCode = 0;
-volatile bool transferAborted = false; // NEW: Abort flag for sequencing errors
-volatile uint16_t lastAckedPacket = 0; // NEW: Track last acked packet
 
 uint8_t *photoBuffer = nullptr;
 volatile uint32_t photoSize = 0;
@@ -39,49 +37,6 @@ uint16_t capturedLuxValue = 0;
 bool capturedIsFallen = false;
 
 // ==================== INTERNAL CALLBACKS ====================
-
-// Helper: Send PKT_NEXT acknowledgement to slave with exponential backoff retry
-// Ensures ACK delivery before slave timeout
-static void sendNextSignal(uint16_t ackCounter) {
-  uint8_t nextPacket[3];
-  nextPacket[0] = PKT_NEXT;
-  nextPacket[1] = (uint8_t)(ackCounter & 0xFF);
-  nextPacket[2] = (uint8_t)((ackCounter >> 8) & 0xFF);
-
-#define NEXT_SIGNAL_MAX_RETRIES 3     // Max attempts to send PKT_NEXT
-#define NEXT_SIGNAL_RETRY_DELAY_MS 20 // Exponential backoff base delay
-
-  esp_err_t result = ESP_FAIL;
-  bool success = false;
-
-  for (uint8_t attempt = 0; attempt < NEXT_SIGNAL_MAX_RETRIES; attempt++) {
-    result = esp_now_send(slaveMac, nextPacket, sizeof(nextPacket));
-    if (result == ESP_OK) {
-      success = true;
-      if (attempt == 0) {
-        // First attempt succeeded
-        Serial.printf("[ESPNOW] >> PKT_NEXT[%u] sent to slave\n", ackCounter);
-      } else {
-        // Retry succeeded
-        Serial.printf("[ESPNOW] >> PKT_NEXT[%u] retry %u SUCCESS\n", ackCounter, attempt);
-      }
-      break;
-    } else {
-      // Send failed, retry with exponential backoff
-      if (attempt < NEXT_SIGNAL_MAX_RETRIES - 1) {
-        uint32_t delayMs = NEXT_SIGNAL_RETRY_DELAY_MS * (attempt + 1);
-        Serial.printf("[ESPNOW] >> PKT_NEXT[%u] send failed (0x%x), retrying in %ums...\n",
-                      ackCounter, result, delayMs);
-        delay(delayMs);
-      }
-    }
-  }
-
-  if (!success) {
-    Serial.printf("[ESPNOW] ERROR: PKT_NEXT[%u] send failed after %u attempts (last: 0x%x)\n",
-                  ackCounter, NEXT_SIGNAL_MAX_RETRIES, result);
-  }
-}
 
 static void handleRecvData(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
   if (data_len < 1)
@@ -127,8 +82,6 @@ static void handleRecvData(const uint8_t *mac_addr, const uint8_t *data, int dat
                         ESP.getFreePsram(), ESP.getFreeHeap());
           memset(photoBuffer, 0, photoSize);
           packetsReceived = 0;
-          lastAckedPacket = 0;     // NEW: Reset ack counter
-          transferAborted = false; // NEW: Clear abort flag
           photoStartReceived = true;
           Serial.printf("[ESPNOW] Buffer allocated: %u bytes\n", photoSize);
         } else {
@@ -142,61 +95,28 @@ static void handleRecvData(const uint8_t *mac_addr, const uint8_t *data, int dat
     break;
 
   case PKT_PHOTO_DATA:
-    if (data_len >= 3 && photoBuffer && photoStartReceived && !transferAborted) {
+    if (data_len >= 3 && photoBuffer && photoStartReceived) {
       uint16_t packetNum = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
       uint16_t dataLen = (uint16_t)(data_len - 3);
       uint32_t offset = (uint32_t)packetNum * ESPNOW_DATA_SIZE;
 
-      // Skip verbose per-packet logging; only log on error/progress milestones
-      // Serial.printf("[ESPNOW] << PKT_DATA[%u] received (%u bytes)\n", packetNum, dataLen);
+      if (offset + dataLen <= photoSize) {
+        memcpy(photoBuffer + offset, data + 3, dataLen);
+        packetsReceived++;
 
-      // NEW: Strict sequencing validation
-      if (packetNum != packetsReceived) {
-        Serial.printf("[ESPNOW] ERROR: Sequence violation! Expected packet %u, got %u\n",
-                      packetsReceived, packetNum);
-        transferAborted = true;
-
-        // Send error to slave
-        uint8_t errPacket[2];
-        errPacket[0] = PKT_ERROR;
-        errPacket[1] = ERR_SEQ_ERROR;
-        esp_now_send(slaveMac, errPacket, sizeof(errPacket));
-        break;
-      }
-
-      // Validate buffer bounds
-      if (offset + dataLen > photoSize) {
-        Serial.printf("[ESPNOW] ERROR: Packet %u offset %u + %u exceeds size %u\n",
+        if (packetsReceived % 50 == 0) {
+          uint32_t bytesRecv = (uint32_t)packetsReceived * ESPNOW_DATA_SIZE;
+          if (bytesRecv > photoSize)
+            bytesRecv = photoSize;
+          Serial.printf("[ESPNOW] Progress: %u/%u packets (%u/%u bytes, %d%%)\n",
+                        packetsReceived, totalPacketsExpected,
+                        bytesRecv, photoSize,
+                        (int)(bytesRecv * 100 / photoSize));
+        }
+      } else {
+        Serial.printf("[ESPNOW] WARNING: Packet %u offset %u + %u exceeds size %u\n",
                       packetNum, offset, dataLen, photoSize);
-        transferAborted = true;
-
-        // Send error to slave
-        uint8_t errPacket[2];
-        errPacket[0] = PKT_ERROR;
-        errPacket[1] = ERR_SEND_FAILED;
-        esp_now_send(slaveMac, errPacket, sizeof(errPacket));
-        break;
       }
-
-      // Write data to buffer
-      memcpy(photoBuffer + offset, data + 3, dataLen);
-      lastAckedPacket = packetNum; // NEW: Track acked packet
-      packetsReceived++;
-
-      // Send handshake acknowledgement
-      sendNextSignal(packetNum); // NEW: Confirm receipt of this packet
-
-      if (packetsReceived % 50 == 0) {
-        uint32_t bytesRecv = (uint32_t)packetsReceived * ESPNOW_DATA_SIZE;
-        if (bytesRecv > photoSize)
-          bytesRecv = photoSize;
-        Serial.printf("[ESPNOW] Progress: %u/%u packets (%u/%u bytes, %d%%)\n",
-                      packetsReceived, totalPacketsExpected,
-                      bytesRecv, photoSize,
-                      (int)(bytesRecv * 100 / photoSize));
-      }
-    } else if (transferAborted) {
-      Serial.println("[ESPNOW] Discarding packet; transfer aborted");
     }
     break;
 
@@ -245,12 +165,6 @@ void initESPNOW() {
   WiFi.softAP(MASTER_AP_SSID, MASTER_AP_PASS, ESPNOW_CHANNEL);
   delay(100);
 
-  // Force 802.11b mode for stable JPEG transfers
-  // 802.11n is fast but sensitive to multipath interference; 802.11b is robust for binary data
-  esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B);
-  esp_wifi_set_ps(WIFI_PS_NONE); // Disable power save for consistent latency
-  Serial.println("[WIFI] WiFi protocol forced to 802.11b, power save disabled");
-
   Serial.printf("[WIFI] AP started: SSID=%s, Channel=%d\n", MASTER_AP_SSID, ESPNOW_CHANNEL);
   Serial.printf("[WIFI] AP MAC: %s\n", WiFi.softAPmacAddress().c_str());
 
@@ -270,8 +184,6 @@ void initESPNOW() {
   slaveError = false;
   slavePaired = false;
   packetsReceived = 0;
-  lastAckedPacket = 0;     // NEW
-  transferAborted = false; // NEW
   if (photoBuffer) {
     free(photoBuffer);
     photoBuffer = nullptr;
@@ -369,8 +281,6 @@ bool receivePhoto() {
   photoEndReceived = false;
   slaveError = false;
   packetsReceived = 0;
-  lastAckedPacket = 0;     // NEW
-  transferAborted = false; // NEW
   lastPacketTime = millis();
 
   uint32_t startTime = millis();
@@ -397,7 +307,7 @@ bool receivePhoto() {
 
   // Phase 2: Receive PHOTO_DATA + PHOTO_END
   Serial.println("[PHOTO] Receiving data packets...");
-  while (!photoEndReceived && !slaveError && !transferAborted) { // NEW: Check abort
+  while (!photoEndReceived && !slaveError) {
     if (millis() - startTime > PHOTO_TIMEOUT_MS) {
       Serial.printf("[ERROR] Photo reception absolute timeout (%ds)\n", PHOTO_TIMEOUT_MS / 1000);
       break;
@@ -407,15 +317,6 @@ bool receivePhoto() {
       break;
     }
     delay(1);
-  }
-
-  // NEW: Check for sequencing errors
-  if (transferAborted) {
-    Serial.printf("[ERROR] Transfer aborted due to sequencing error at packet %u\n",
-                  packetsReceived);
-    free(photoBuffer);
-    photoBuffer = nullptr;
-    return false;
   }
 
   if (slaveError) {

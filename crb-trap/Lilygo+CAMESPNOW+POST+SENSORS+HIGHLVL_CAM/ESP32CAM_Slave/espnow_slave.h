@@ -14,10 +14,9 @@
 #include <esp_now.h>
 
 // ==================== SLAVE TIMING / RETRY CONFIG ====================
-#define MAX_SEND_RETRIES 5          // Retries per packet on delivery failure
-#define SCAN_MAX_RETRIES 10         // WiFi scan attempts to locate master AP
-#define SEND_TIMEOUT_MS 2000        // Callback wait timeout per send attempt (ms)
-#define NEXT_SIGNAL_TIMEOUT_MS 1500 // NEW: Timeout waiting for PKT_NEXT from master (ms)
+#define MAX_SEND_RETRIES 5   // Retries per packet on delivery failure
+#define SCAN_MAX_RETRIES 10  // WiFi scan attempts to locate master AP
+#define SEND_TIMEOUT_MS 2000 // Callback wait timeout per send attempt (ms)
 
 // ==================== EXTERNAL STATE ====================
 // Defined in espnow_slave.cpp; read/written by the main loop and camera module.
@@ -31,8 +30,6 @@ extern volatile uint16_t cmdLux;
 extern volatile uint16_t cmdWidth;
 extern volatile uint16_t cmdHeight;
 extern volatile uint8_t cmdQuality;
-extern volatile bool espnowNextReceived; // NEW: PKT_NEXT received from master
-extern volatile uint16_t lastAckCounter; // NEW: Ack counter from PKT_NEXT
 
 // ==================== API ====================
 

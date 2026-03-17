@@ -56,12 +56,17 @@ void setup() {
   pictureNumber = (stored == 255) ? 1 : (uint8_t)(stored + 1);
   Serial.printf("[EEPROM] Picture number: %d\n", pictureNumber);
 
-  // Reset I2C SCCB bus before camera init to clear any lock-up state
-  initializeSCCBBus();
-  delay(500);
+  // Initialise camera at VGA resolution using esp32cam library
+  // Select VGA resolution (640x480) as default for ESP-NOW transfers
+  esp32cam::Resolution vgaResolution = esp32cam::Resolution::find(640, 480);
+  if (!vgaResolution.isValid()) {
+    Serial.println("[CAM] FATAL: VGA resolution not found, restarting...");
+    delay(1000);
+    ESP.restart();
+  }
 
-  // Initialise camera at VGA — slave always uses VGA or smaller for ESP-NOW transfers
-  if (!initCamera(FRAMESIZE_VGA, 10)) {
+  // Initialize camera with VGA resolution and quality 15 (out of 100)
+  if (!initCamera(vgaResolution, 15)) {
     Serial.println("[CAM] FATAL: Camera init failed, restarting...");
     delay(1000);
     ESP.restart();
@@ -77,13 +82,6 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
-
-  // Force 802.11b mode for stable JPEG transfers
-  // 802.11n is fast but sensitive to multipath interference; 802.11b is robust for binary data
-  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B);
-  esp_wifi_set_ps(WIFI_PS_NONE); // Disable power save for consistent latency
-  Serial.println("[WIFI] WiFi protocol forced to 802.11b, power save disabled");
-
   Serial.printf("[WIFI] STA MAC: %s\n", WiFi.macAddress().c_str());
 
   // Initialise ESP-NOW
@@ -131,8 +129,8 @@ void loop() {
       espnowSendReliable(errPkt, sizeof(errPkt));
       return;
     }
-    if (q < 1 || q > 63) {
-      Serial.println("[ERROR] Invalid quality (1-63)");
+    if (q < 0 || q > 100) {
+      Serial.println("[ERROR] Invalid quality (0-100)");
       uint8_t errPkt[2] = {PKT_ERROR, ERR_INVALID_PARAMS};
       espnowSendReliable(errPkt, sizeof(errPkt));
       return;

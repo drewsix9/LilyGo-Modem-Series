@@ -11,23 +11,28 @@
 #include <stdint.h>
 
 // ==================== ESP-NOW CONFIGURATION ====================
-#define ESPNOW_CHANNEL    1
-#define MASTER_AP_SSID    "CRBMaster"
-#define ESPNOW_DATA_SIZE  240  // Max data payload bytes per ESP-NOW packet
+#define ESPNOW_CHANNEL 1
+#define MASTER_AP_SSID "CRBMaster"
+#define ESPNOW_DATA_SIZE 240 // Max data payload bytes per ESP-NOW packet
 
 // ==================== PACKET TYPES ====================
 // First byte of every ESP-NOW packet identifies its type.
-#define PKT_READY       0x00  // slave  -> master  payload: "READY" (5 bytes)
-#define PKT_PHOTO_CMD   0x01  // master -> slave   payload: lux(2)+w(2)+h(2)+q(1) = 7 bytes
-#define PKT_PHOTO_START 0x10  // slave  -> master  payload: totalSize(4)+totalPackets(2) = 6 bytes
-#define PKT_PHOTO_DATA  0x20  // slave  -> master  payload: packetNum(2)+data(<=240)
-#define PKT_PHOTO_END   0x30  // slave  -> master  payload: CRC32(4) = 4 bytes
-#define PKT_ERROR       0xF0  // slave  -> master  payload: error code(1)
+#define PKT_READY 0x00       // slave  -> master  payload: "READY" (5 bytes)
+#define PKT_PHOTO_CMD 0x01   // master -> slave   payload: lux(2)+w(2)+h(2)+q(1) = 7 bytes
+#define PKT_PHOTO_START 0x10 // slave  -> master  payload: totalSize(4)+totalPackets(2) = 6 bytes
+#define PKT_PHOTO_DATA 0x20  // slave  -> master  payload: packetNum(2)+data(<=240)
+#define PKT_PHOTO_END 0x30   // slave  -> master  payload: CRC32(4) = 4 bytes
+#define PKT_NEXT 0x40        // master -> slave   payload: ackCounter(2) = 2 bytes
+#define PKT_ERROR 0xF0       // slave  -> master  payload: error code(1)
 
 // ==================== ERROR CODES ====================
-#define ERR_CAPTURE_FAILED  0x01
-#define ERR_SEND_FAILED     0x02
-#define ERR_INVALID_PARAMS  0x03
+#define ERR_CAPTURE_FAILED 0x01
+#define ERR_SEND_FAILED 0x02
+#define ERR_INVALID_PARAMS 0x03
+#define ERR_SEQ_ERROR 0x04 // Packet out of order or sequence mismatch
+
+// ==================== HANDSHAKE TIMING ====================
+#define SLAVE_SEND_WAIT_MS 1500 // Slave timeout waiting for PKT_NEXT from master (ms)
 
 // ==================== CRC32 ====================
 /**

@@ -27,9 +27,6 @@ volatile uint16_t cmdLux = 500;
 volatile uint16_t cmdWidth = 640;
 volatile uint16_t cmdHeight = 480;
 volatile uint8_t cmdQuality = 10;
-volatile bool espnowNextReceived = false;        // NEW: PKT_NEXT received from master
-volatile uint16_t lastAckCounter = 0;            // NEW: Ack counter from PKT_NEXT
-volatile uint16_t expectedAckPacketNum = 0xFFFF; // NEW: Expected packet number for strict ACK validation
 
 // ==================== INTERNAL CALLBACKS ====================
 
@@ -56,24 +53,6 @@ static void handleRecvData(const uint8_t *mac_addr, const uint8_t *data, int dat
                     cmdLux, cmdWidth, cmdHeight, cmdQuality);
     } else {
       Serial.printf("[ESPNOW] Invalid PHOTO_CMD length: %d\n", data_len);
-    }
-    break;
-
-  case PKT_NEXT: // NEW: Master acknowledging a data packet
-    if (data_len >= 3) {
-      lastAckCounter = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
-
-      // STRICT: Only accept PKT_NEXT if it matches the packet we're waiting for
-      if (lastAckCounter == expectedAckPacketNum) {
-        espnowNextReceived = true;
-        Serial.printf("[ESPNOW] << PKT_NEXT[%u] received from master (MATCH)\n", lastAckCounter);
-      } else {
-        // Discard out-of-order or stale ACK
-        Serial.printf("[ESPNOW] << PKT_NEXT[%u] DISCARDED (expected %u)\n",
-                      lastAckCounter, expectedAckPacketNum);
-        // Do NOT set espnowNextReceived = true
-        // This forces waiter to timeout and retry/resync
-      }
     }
     break;
 
@@ -233,38 +212,6 @@ bool sendReadySignal() {
   return ok;
 }
 
-// NEW: Helper function to wait for PKT_NEXT handshake signal from master
-// Implements timeout with single retry to handle transient radio issues
-static bool waitForNextSignal(uint16_t expectedPacketNum) {
-#define WAIT_NEXT_MAX_ATTEMPTS 2 // First wait + one retry
-
-  for (uint8_t attempt = 0; attempt < WAIT_NEXT_MAX_ATTEMPTS; attempt++) {
-    espnowNextReceived = false;
-    lastAckCounter = 0xFFFF;
-    expectedAckPacketNum = expectedPacketNum; // Set expected for handler to validate against
-
-    uint32_t waitStart = millis();
-    while (!espnowNextReceived && (millis() - waitStart < NEXT_SIGNAL_TIMEOUT_MS)) {
-      delay(1);
-    }
-
-    if (espnowNextReceived) {
-      Serial.printf("[ESPNOW] << PKT_NEXT[%u] confirmed from master\n", lastAckCounter);
-      return true;
-    }
-
-    if (attempt < WAIT_NEXT_MAX_ATTEMPTS - 1) {
-      Serial.printf("[ESPNOW] TIMEOUT on PKT_NEXT[%u] (attempt %u), retrying...\n",
-                    expectedPacketNum, attempt + 1);
-      delay(50); // Brief pause before retry
-    }
-  }
-
-  Serial.printf("[ESPNOW] FATAL: TIMEOUT waiting for PKT_NEXT[%u] after %u attempts\n",
-                expectedPacketNum, WAIT_NEXT_MAX_ATTEMPTS);
-  return false;
-}
-
 bool sendPhotoViaESPNOW(camera_fb_t *fb) {
   if (!fb || fb->len == 0) {
     Serial.println("[ESPNOW] ERROR: No frame buffer");
@@ -297,7 +244,7 @@ bool sendPhotoViaESPNOW(camera_fb_t *fb) {
   Serial.println("[ESPNOW] PHOTO_START sent");
   delay(50); // Give master time to allocate buffer
 
-  // --- PHOTO_DATA packets with handshake: type(1) + packetNum(2) + data(chunkSize) ---
+  // --- PHOTO_DATA packets: type(1) + packetNum(2) + data(chunkSize) ---
   uint32_t bytesSent = 0;
   uint16_t packetNum = 0;
   uint32_t sendStartTime = millis();
@@ -315,22 +262,6 @@ bool sendPhotoViaESPNOW(camera_fb_t *fb) {
 
     if (!espnowSendReliable(dataPacket, 3 + chunkSize)) {
       Serial.printf("[ESPNOW] FATAL: Failed to send packet %u\n", packetNum);
-      // Send error packet to master
-      uint8_t errPacket[2];
-      errPacket[0] = PKT_ERROR;
-      errPacket[1] = ERR_SEND_FAILED;
-      esp_now_send(masterMac, errPacket, sizeof(errPacket));
-      return false;
-    }
-
-    // NEW: Wait for handshake acknowledgement from master
-    if (!waitForNextSignal(packetNum)) {
-      Serial.printf("[ESPNOW] FATAL: Handshake timeout after packet %u\n", packetNum);
-      // Send error packet to master
-      uint8_t errPacket[2];
-      errPacket[0] = PKT_ERROR;
-      errPacket[1] = ERR_SEND_FAILED;
-      esp_now_send(masterMac, errPacket, sizeof(errPacket));
       return false;
     }
 
@@ -346,8 +277,7 @@ bool sendPhotoViaESPNOW(camera_fb_t *fb) {
     }
 
     yield();
-    // NEW: Reduced delay since we're now waiting for handshake
-    delay(1);
+    delay(2);
   }
 
   uint32_t transferTime = millis() - sendStartTime;
