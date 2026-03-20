@@ -78,6 +78,37 @@ static void sendNextSignal(uint16_t ackCounter) {
   // Silent failure: slave will timeout and retry. Logging here only stalls the interrupt.
 }
 
+// NEW: Helper to send PKT_NACK (negative acknowledgment) to slave on photo reception error
+// Used when CRC32 verification fails or sequence errors detected
+// Attempts with exponential backoff; silent on failure (slave will timeout and resync on next PHOTO_CMD)
+static void sendNackSignal(uint8_t errorCode) {
+  uint8_t nackPacket[2];
+  nackPacket[0] = PKT_NACK;
+  nackPacket[1] = errorCode;
+
+#define NACK_SIGNAL_MAX_RETRIES 3     // Max attempts to send PKT_NACK
+#define NACK_SIGNAL_RETRY_DELAY_MS 20 // Exponential backoff base delay
+
+  for (uint8_t attempt = 0; attempt < NACK_SIGNAL_MAX_RETRIES; attempt++) {
+    esp_err_t result = esp_now_send(slaveMac, nackPacket, sizeof(nackPacket));
+    if (result == ESP_OK) {
+      // Note: We can log here since this is called from main thread, not interrupt
+      Serial.printf("[ESPNOW] >> PKT_NACK[0x%02X] sent to slave (attempt %u SUCCESS)\n",
+                    errorCode, attempt + 1);
+      return;
+    } else {
+      // Send failed, retry with exponential backoff
+      if (attempt < NACK_SIGNAL_MAX_RETRIES - 1) {
+        uint32_t delayMs = NACK_SIGNAL_RETRY_DELAY_MS * (attempt + 1);
+        delay(delayMs);
+      }
+    }
+  }
+  // Failure logged for diagnostics; slave will timeout on its own within NEXT_SIGNAL_TIMEOUT_MS
+  Serial.printf("[ESPNOW] NACK[0x%02X] delivery failed after %u retries\n",
+                errorCode, NACK_SIGNAL_MAX_RETRIES);
+}
+
 static void handleRecvData(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
   if (data_len < 1)
     return;
@@ -498,9 +529,13 @@ bool receivePhoto() {
       Serial.println("[UPLOAD] Modem init failed, photo not uploaded");
     }
   } else {
-    Serial.printf("[ERROR] CRC32 MISMATCH! Got %08X, expected %08X\n",
+    // NEW: CRC32 mismatch — send NACK to master to abort transfer
+    Serial.printf("[ERROR] CRC32 MISMATCH! Calculated %08X, received %08X\n",
                   calculatedCRC, receivedCRC32);
     Serial.printf("[DEBUG] Packets received: %u/%u\n", packetsReceived, totalPacketsExpected);
+
+    Serial.println("[ESPNOW] Sending NACK to slave to signal transfer failure...");
+    sendNackSignal(ERR_CRC_MISMATCH);
   }
 
   free(photoBuffer);

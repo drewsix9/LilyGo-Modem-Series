@@ -33,6 +33,8 @@ extern volatile uint16_t cmdHeight;
 extern volatile uint8_t cmdQuality;
 extern volatile bool espnowNextReceived; // NEW: PKT_NEXT received from master
 extern volatile uint16_t lastAckCounter; // NEW: Ack counter from PKT_NEXT
+extern volatile bool espnowNackReceived; // NEW: PKT_NACK received from master (transfer abort)
+extern volatile uint8_t nackErrorCode;   // NEW: Error code from PKT_NACK
 
 // ==================== API ====================
 

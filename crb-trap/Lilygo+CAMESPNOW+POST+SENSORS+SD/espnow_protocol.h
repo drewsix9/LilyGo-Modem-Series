@@ -29,13 +29,15 @@
 #define PKT_PHOTO_DATA 0x20  // slave  -> master  payload: packetNum(2)+data(<=240)
 #define PKT_PHOTO_END 0x30   // slave  -> master  payload: CRC32(4) = 4 bytes
 #define PKT_NEXT 0x40        // master -> slave   payload: ackCounter(2) = 2 bytes
+#define PKT_NACK 0x41        // master -> slave   payload: errorCode(1) = 1 byte
 #define PKT_ERROR 0xF0       // slave  -> master  payload: error code(1)
 
 // ==================== ERROR CODES ====================
 #define ERR_CAPTURE_FAILED 0x01
 #define ERR_SEND_FAILED 0x02
 #define ERR_INVALID_PARAMS 0x03
-#define ERR_SEQ_ERROR 0x04 // Packet out of order or sequence mismatch
+#define ERR_SEQ_ERROR 0x04    // Packet out of order or sequence mismatch
+#define ERR_CRC_MISMATCH 0x05 // CRC32 verification failed on received photo
 
 // ==================== HANDSHAKE TIMING ====================
 #define SLAVE_SEND_WAIT_MS 1500 // Slave timeout waiting for PKT_NEXT from master (ms)

@@ -30,6 +30,8 @@ volatile uint8_t cmdQuality = 10;
 volatile bool espnowNextReceived = false;        // NEW: PKT_NEXT received from master
 volatile uint16_t lastAckCounter = 0;            // NEW: Ack counter from PKT_NEXT
 volatile uint16_t expectedAckPacketNum = 0xFFFF; // NEW: Expected packet number for strict ACK validation
+volatile bool espnowNackReceived = false;        // NEW: PKT_NACK received from master (transfer abort)
+volatile uint8_t nackErrorCode = 0;              // NEW: Error code from PKT_NACK
 
 // ==================== INTERNAL CALLBACKS ====================
 
@@ -74,6 +76,15 @@ static void handleRecvData(const uint8_t *mac_addr, const uint8_t *data, int dat
         // Do NOT set espnowNextReceived = true
         // This forces waiter to timeout and retry/resync
       }
+    }
+    break;
+
+  case PKT_NACK: // NEW: Master signaling photo reception failure (CRC mismatch or seq error)
+    if (data_len >= 2) {
+      nackErrorCode = data[1];
+      espnowNackReceived = true;
+      Serial.printf("[ESPNOW] << PKT_NACK received from master with error code 0x%02X\n", nackErrorCode);
+      Serial.println("[ESPNOW] Transfer aborted by master - waiting for new PHOTO_CMD");
     }
     break;
 
@@ -312,6 +323,13 @@ bool sendPhotoViaESPNOW(camera_fb_t *fb) {
   uint32_t lastProgressLog = 0;
 
   while (bytesSent < totalSize) {
+    // NEW: Check for NACK (master abort signal) before each packet
+    if (espnowNackReceived) {
+      Serial.printf("[ESPNOW] NACK received from master (error code 0x%02X) - aborting transfer\n", nackErrorCode);
+      espnowNackReceived = false; // Reset for next transfer
+      return false;
+    }
+
     uint32_t remaining = totalSize - bytesSent;
     uint16_t chunkSize = (remaining > ESPNOW_DATA_SIZE) ? ESPNOW_DATA_SIZE : (uint16_t)remaining;
 
