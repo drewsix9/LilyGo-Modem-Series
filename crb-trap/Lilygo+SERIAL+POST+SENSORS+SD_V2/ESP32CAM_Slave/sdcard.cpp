@@ -15,6 +15,40 @@
 // ==================== GLOBAL STATE ====================
 bool sdAvailable = false;
 
+static const uint16_t PHOTO_NUM_MIN = 1;
+static const uint16_t PHOTO_NUM_MAX = 9999;
+
+static uint16_t readPhotoCounter() {
+  uint8_t low = EEPROM.read(0);
+  uint8_t high = EEPROM.read(1);
+
+  // Fresh EEPROM state.
+  if (low == 0xFF && high == 0xFF) {
+    return PHOTO_NUM_MIN;
+  }
+
+  // Backward compatibility with legacy 1-byte storage.
+  if (high == 0xFF) {
+    uint16_t legacyNext = (uint16_t)low + 1;
+    if (legacyNext < PHOTO_NUM_MIN || legacyNext > PHOTO_NUM_MAX) {
+      return PHOTO_NUM_MIN;
+    }
+    return legacyNext;
+  }
+
+  uint16_t nextNum = (uint16_t)low | ((uint16_t)high << 8);
+  if (nextNum < PHOTO_NUM_MIN || nextNum > PHOTO_NUM_MAX) {
+    return PHOTO_NUM_MIN;
+  }
+  return nextNum;
+}
+
+static void writePhotoCounter(uint16_t nextNum) {
+  EEPROM.write(0, (uint8_t)(nextNum & 0xFF));
+  EEPROM.write(1, (uint8_t)((nextNum >> 8) & 0xFF));
+  EEPROM.commit();
+}
+
 // ==================== SD CARD INITIALIZATION ====================
 
 bool initSDCard() {
@@ -89,17 +123,10 @@ bool getNextFilename(char *filename, size_t maxLen) {
     return false;
   }
 
-  // Initialize EEPROM if not already done (caller handles EEPROM.begin())
-  uint8_t stored = EEPROM.read(0);
-  uint8_t nextNum = (stored == 255) ? 1 : (uint8_t)(stored + 1);
-
-  // Wrap counter at 9999 (0 means 10000, which wraps to 1)
-  if (nextNum == 0) {
-    nextNum = 1;
-  }
+  uint16_t nextNum = readPhotoCounter();
 
   // Format: IMG_0001.jpg
-  int written = snprintf(filename, maxLen, "IMG_%04d.jpg", nextNum);
+  int written = snprintf(filename, maxLen, "IMG_%04u.jpg", (unsigned int)nextNum);
   if (written < 0 || (size_t)written >= maxLen) {
     Serial.println("[SD] ERROR: Filename format failed");
     return false;
@@ -122,6 +149,7 @@ bool savePhotoToSD(const uint8_t *buffer, size_t len) {
   }
 
   // Get next filename
+  uint16_t currentNum = readPhotoCounter();
   char filename[64];
   if (!getNextFilename(filename, sizeof(filename))) {
     Serial.println("[SD] ERROR: Failed to generate filename");
@@ -152,14 +180,12 @@ bool savePhotoToSD(const uint8_t *buffer, size_t len) {
     return false;
   }
 
-  // Increment EEPROM counter after successful write
-  uint8_t stored = EEPROM.read(0);
-  uint8_t nextNum = (stored == 255) ? 1 : (uint8_t)(stored + 1);
-  if (nextNum == 0) {
-    nextNum = 1; // Wrap to 1 (9999 -> 0 -> 1)
+  // Increment EEPROM counter after successful write.
+  uint16_t nextNum = currentNum + 1;
+  if (nextNum > PHOTO_NUM_MAX) {
+    nextNum = PHOTO_NUM_MIN;
   }
-  EEPROM.write(0, nextNum - 1); // Store current, next iteration reads and increments
-  EEPROM.commit();
+  writePhotoCounter(nextNum);
 
   Serial.printf("[SD] Save: %s (%zu bytes) OK\n", filepath, len);
   return true;

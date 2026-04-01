@@ -32,10 +32,10 @@
 #include "uart_slave.h"
 
 // ==================== EEPROM ====================
-#define EEPROM_SIZE 1
+#define EEPROM_SIZE 2
 
 // ==================== GLOBALS ====================
-uint8_t pictureNumber = 1;
+uint16_t pictureNumber = 1;
 
 // ==================== SETUP ====================
 void setup() {
@@ -52,9 +52,20 @@ void setup() {
 
   // Restore picture counter from EEPROM
   EEPROM.begin(EEPROM_SIZE);
-  uint8_t stored = EEPROM.read(0);
-  pictureNumber = (stored == 255) ? 1 : (uint8_t)(stored + 1);
-  Serial.printf("[EEPROM] Picture number: %d\n", pictureNumber);
+  uint8_t low = EEPROM.read(0);
+  uint8_t high = EEPROM.read(1);
+  if (low == 0xFF && high == 0xFF) {
+    pictureNumber = 1;
+  } else if (high == 0xFF) {
+    // Legacy 1-byte value: stored previous image number.
+    pictureNumber = (uint16_t)low + 1;
+  } else {
+    pictureNumber = (uint16_t)low | ((uint16_t)high << 8);
+    if (pictureNumber == 0 || pictureNumber > 9999) {
+      pictureNumber = 1;
+    }
+  }
+  Serial.printf("[EEPROM] Next picture number: %u\n", (unsigned int)pictureNumber);
 
   // Reset I2C SCCB bus before camera init to clear any lock-up state
   initializeSCCBBus();

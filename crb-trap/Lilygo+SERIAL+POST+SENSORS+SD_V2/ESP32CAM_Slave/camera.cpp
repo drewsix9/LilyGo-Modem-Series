@@ -219,6 +219,30 @@ bool captureAndSendPhoto(uint16_t lux, uint16_t width, uint16_t height, uint8_t 
       temp->len -= soiOffset;
       Serial.printf("[CAM] Adjusted buffer: skipped %u bytes of DMA padding\n", soiOffset);
     }
+
+    // Validate JPEG EOI (FF D9). Missing EOI usually means a truncated DMA frame.
+    int32_t eoiPos = -1;
+    for (int32_t i = (int32_t)temp->len - 2; i >= 0; --i) {
+      if (temp->buf[i] == 0xFF && temp->buf[i + 1] == 0xD9) {
+        eoiPos = i;
+        break;
+      }
+    }
+
+    if (eoiPos < 0) {
+      Serial.printf("[CAM] Invalid frame on attempt %d (%u bytes, missing JPEG EOI)\n",
+                    attempt + 1, temp->len);
+      esp_camera_fb_return(temp);
+      delay(300);
+      continue;
+    }
+
+    uint32_t effectiveLen = (uint32_t)eoiPos + 2;
+    if (effectiveLen < temp->len) {
+      Serial.printf("[CAM] Trimming %u trailing bytes after JPEG EOI\n", temp->len - effectiveLen);
+      temp->len = effectiveLen;
+    }
+
     fb = temp;
     Serial.printf("[CAM] Valid JPEG captured: %u bytes (attempt %d)\n",
                   fb->len, attempt + 1);
