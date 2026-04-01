@@ -40,6 +40,49 @@
 #define CAM_BOOT_TIME_MS 2500    // Camera power-on to UART-ready delay (ms)
 #define UART_RX_TIMEOUT_MS 10000 // Timeout for photo reception from slave
 
+// ==================== UART TEST MODE ====================
+#define UART_TEST_ENABLED false
+#define UART_TEST_REPEAT_MODE true
+#define UART_TEST_REPEAT_COUNT 10
+#define UART_TEST_GAP_MS 1000
+
+// ==================== QUICK UART TEST ====================
+static void runUartLinkTest() {
+  Serial.println("\n[TEST] Starting UART link test (GPIO18 TX, GPIO19 RX)...");
+
+  uint16_t totalRuns = UART_TEST_REPEAT_MODE ? UART_TEST_REPEAT_COUNT : 1;
+  uint16_t passCount = 0;
+
+  for (uint16_t i = 0; i < totalRuns; i++) {
+    Serial.printf("[TEST] Run %u/%u\n", i + 1, totalRuns);
+
+    if (!initMasterSerialTransfer(18, 19)) {
+      Serial.println("[TEST] FAIL: UART init failed");
+      continue;
+    }
+
+    powerOnCamera();
+    delay(CAM_BOOT_TIME_MS);
+
+    bool ready = waitForSlaveReady(20000);
+    if (ready) {
+      passCount++;
+      Serial.println("[TEST] PASS: Slave READY received over UART");
+    } else {
+      Serial.println("[TEST] FAIL: No READY from slave (check TX/RX and GND)");
+      diagnosticMasterUARTStatus();
+    }
+
+    powerOffCamera();
+
+    if (i + 1 < totalRuns) {
+      delay(UART_TEST_GAP_MS);
+    }
+  }
+
+  Serial.printf("[TEST] Summary: %u/%u PASS\n", passCount, totalRuns);
+}
+
 // ==================== SETUP ====================
 void setup() {
   Serial.begin(115200);
@@ -106,25 +149,29 @@ void setup() {
     Serial.printf("[WAIT] Waiting %d ms for camera power-on...\n", CAM_BOOT_TIME_MS);
     delay(CAM_BOOT_TIME_MS);
 
-    Serial.println("[UART] Waiting for slave READY signal...");
-    PhotoMetadata metadata;
-    if (!waitForSlaveReady(metadata, UART_RX_TIMEOUT_MS)) {
+    Serial.println("[UART] Waiting for slave READY signal (ASCII)...");
+    if (!waitForSlaveReady(UART_RX_TIMEOUT_MS)) {
       Serial.println("[UART] ERROR: Slave READY timeout!");
       powerOffCamera();
       enterDeepSleep();
     }
 
     Serial.println("[UART] Slave is READY");
-    Serial.printf("[SENSOR] Slave metadata: LUX=%d, fallen=%d, %dx%d\n",
-                  metadata.luxValue, metadata.isFallen,
-                  metadata.photoWidth, metadata.photoHeight);
 
-    // Send ACK to slave to proceed with photo capture
-    if (!sendSlaveACK()) {
-      Serial.println("[UART] ERROR: Failed to send ACK");
+    // Send ASCII PHOTO command to slave
+    // Format: "PHOTO:width:height:quality\n"
+    Serial.printf("[UART] Sending PHOTO command: %dx%d quality=%d\n",
+                  PHOTO_WIDTH, PHOTO_HEIGHT, PHOTO_QUALITY);
+    if (!sendPhotoCommand(PHOTO_WIDTH, PHOTO_HEIGHT, PHOTO_QUALITY)) {
+      Serial.println("[UART] ERROR: Failed to send PHOTO command");
       powerOffCamera();
       enterDeepSleep();
     }
+
+    // Give slave immediate time to start capture and transmission
+    // Don't wait 500ms - the slave will send PHOTO_HEADER as soon as it's ready
+    // SerialTransfer.tick() handles any timing jitter properly
+    delay(100);
 
     Serial.println("[UART] Receiving photo chunks from slave...");
     Serial.printf("[MEMORY] Before photo RX: Free PSRAM: %u bytes, Free heap: %u bytes\n",
@@ -145,9 +192,7 @@ void setup() {
 
     Serial.printf("[SUCCESS] Photo received: %lu bytes\n", photoSize);
 
-    // Process photo and upload (pass sensor metadata from slave)
-    // The photo buffer is already allocated by receivePhotoChunked
-    // This can be integrated with your existing http_upload module
+    // Process photo and upload (photo buffer is already allocated)
 
     powerOffCamera();
     freePhotoBuffer();
@@ -160,6 +205,13 @@ void setup() {
     delay(1000);
     powerOffCamera();
     Serial.println("[TEST] Power control test completed");
+
+    // UART wiring/handshake check is compile-time toggleable.
+    if (UART_TEST_ENABLED) {
+      runUartLinkTest();
+    } else {
+      Serial.println("[TEST] UART link test disabled (UART_TEST_ENABLED=false)");
+    }
   }
 
   // ==================== CONFIGURE AND ENTER DEEP SLEEP ====================

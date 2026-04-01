@@ -1,27 +1,45 @@
 /**
  * @file      serialtransfer_slave.cpp
- * @brief     SerialTransfer protocol implementation for ESP32-CAM slave
+ * @brief     Hybrid protocol implementation for ESP32-CAM slave:
+ *            ASCII commands + SerialTransfer image data
  * @license   MIT
  * @copyright Copyright (c) 2026
- * @date      2026-03-21
+ * @date      2026-03-31
+ * @note      Commands use simple serial (text), image chunks use SerialTransfer (binary)
  */
 
 #include "serialtransfer_slave.h"
+#include "esp_task_wdt.h"
 #include "serialtransfer_protocol.h"
 #include "uart_config.h"
 #include <SerialTransfer.h>
 
 // ==================== GLOBAL STATE ====================
 
-static SerialTransfer myTransfer;
-static volatile bool masterAckReceived = false;
-static volatile bool masterCommandReceived = false;
-static volatile uint32_t lastPacketTime = 0;
+// SerialTransfer instance for binary photo chunk transmission only
+static SerialTransfer binaryTransfer;
+
+// Photo transmission state flag (prevents periodic READY from corrupting binary stream)
+static bool inPhotoTransmission = false;
+
+// ASCII command state machine
+static char asciiLineBuffer[ASCII_CMD_MAX_LEN] = {0};
+static uint8_t asciiLineIdx = 0;
+static volatile uint32_t lastCommandTime = 0;
+
+// Parsed command state
+struct {
+  bool hasNewCommand;
+  char cmdName[16]; // e.g., "PHOTO", "STAT", "PING"
+  uint16_t width;   // PHOTO command parameter
+  uint16_t height;  // PHOTO command parameter
+  uint8_t quality;  // PHOTO command parameter
+} currentCommand = {false, "", 0, 0, 0};
 
 // ==================== INITIALIZATION ====================
 
 bool initSerialTransfer() {
-  Serial.println("[UART] Initializing Serial2 (UART1)...");
+  Serial.println("[UART] Initializing Serial2 (UART1) for hybrid protocol...");
 
   // Configure Serial2 with custom UART pins
   UART_PORT.begin(UART_BAUD_RATE, UART_CONFIG, UART_RX_PIN, UART_TX_PIN);
@@ -31,112 +49,263 @@ bool initSerialTransfer() {
 
   delay(100);
 
-  // Initialize SerialTransfer on Serial2
-  myTransfer.begin(UART_PORT, true, Serial); // debug=true, debugPort=Serial
+  // Initialize SerialTransfer on Serial2 for binary image data only
+  binaryTransfer.begin(UART_PORT, true, Serial); // debug=true, debugPort=Serial
 
-  Serial.println("[UART] SerialTransfer initialized");
+  Serial.println("[UART] SerialTransfer initialized (binary image data mode)");
+  Serial.println("[UART] ASCII command parser ready (text mode)");
   Serial.printf("[UART] RX buffer ready (max %d bytes per packet)\n", PHOTO_CHUNK_SIZE);
 
+  lastCommandTime = millis();
   return true;
 }
 
-// ==================== READY SIGNAL ====================
+// ==================== ASCII COMMAND PARSING ====================
+/**
+ * @brief Read a complete ASCII line from UART (terminated by \n)
+ * @param outLine [out] Buffer to store the read line (including \n)
+ * @param maxLen Maximum buffer size
+ * @return Number of bytes read (0 if no complete line available)
+ */
+static uint16_t readAsciiLine(char *outLine, uint16_t maxLen) {
+  if (!outLine || maxLen == 0)
+    return 0;
 
-bool sendReadyPacket(const PhotoMetadata &metadata) {
-  Serial.println("[TX] Sending READY packet with metadata...");
+  while (UART_PORT.available()) {
+    int c = UART_PORT.read();
 
-  uint16_t sendSize = 0;
+    if (c == -1)
+      break; // No more data
 
-  // Pack metadata into transfer buffer
-  sendSize = myTransfer.txObj(metadata, sendSize, sizeof(PhotoMetadata));
+    if (c == '\n' || c == '\r') {
+      if (asciiLineIdx > 0) {
+        // Complete line received
+        memcpy(outLine, asciiLineBuffer, asciiLineIdx);
+        outLine[asciiLineIdx] = '\0';
 
-  // Send as PACKET_ID_READY
-  uint8_t status = myTransfer.sendData(sendSize, PACKET_ID_READY);
+        uint16_t result = asciiLineIdx;
+        asciiLineIdx = 0;
+        memset(asciiLineBuffer, 0, ASCII_CMD_MAX_LEN);
 
-  if (status == 0) {
-    Serial.printf("[TX] ERROR: Failed to send READY packet (status=%d)\n", status);
+        return result;
+      }
+      // Skip leading newlines
+      continue;
+    }
+
+    // Accumulate character
+    if (asciiLineIdx < ASCII_CMD_MAX_LEN - 1) {
+      asciiLineBuffer[asciiLineIdx++] = (char)c;
+    } else {
+      // Buffer overflow
+      Serial.println("[CMD] ERROR: ASCII command buffer overflow");
+      asciiLineIdx = 0;
+      return 0;
+    }
+  }
+
+  return 0; // No complete line yet
+}
+
+/**
+ * @brief Parse an ASCII command line into command structure
+ * @param line Input ASCII line (null-terminated)
+ * @return true if parse successful, false otherwise
+ */
+static bool parseCommand(const char *line) {
+  if (!line || strlen(line) == 0)
+    return false;
+
+  // Extract command name (uppercase)
+  char cmdName[32] = {0};
+  int n = sscanf(line, "%31[^:]", cmdName);
+  if (n < 1) {
+    Serial.printf("[CMD] Parse error: invalid command format '%s'\n", line);
     return false;
   }
 
-  Serial.printf("[TX] READY packet sent (size=%d, LUX=%d, fallen=%d)\n",
-                sendSize, metadata.luxValue, metadata.isFallen);
+  currentCommand.hasNewCommand = true;
+  strncpy(currentCommand.cmdName, cmdName, sizeof(currentCommand.cmdName) - 1);
 
-  lastPacketTime = millis();
+  Serial.printf("[CMD] Parsed command: %s\n", currentCommand.cmdName);
+
+  // Parse command-specific parameters
+  if (strcmp(cmdName, CMD_PHOTO) == 0) {
+    // Format: "PHOTO:width:height:quality\n"
+    uint16_t w, h;
+    uint8_t q;
+    n = sscanf(line, "%*[^:]:%hu:%hu:%hhu", &w, &h, &q);
+
+    if (n != 3) {
+      Serial.printf("[CMD] PHOTO parse error: expected 3 params, got %d\n", n);
+      return false;
+    }
+
+    // Validate parameters
+    if (w < PHOTO_WIDTH_MIN || w > PHOTO_WIDTH_MAX ||
+        h < PHOTO_HEIGHT_MIN || h > PHOTO_HEIGHT_MAX ||
+        q < PHOTO_QUALITY_MIN || q > PHOTO_QUALITY_MAX) {
+      Serial.printf("[CMD] PHOTO validation: invalid dims %dx%d or quality %d\n", w, h, q);
+      return false;
+    }
+
+    currentCommand.width = w;
+    currentCommand.height = h;
+    currentCommand.quality = q;
+    Serial.printf("[CMD] PHOTO: %dx%d quality=%d\n", w, h, q);
+
+  } else if (strcmp(cmdName, CMD_STAT) == 0 ||
+             strcmp(cmdName, CMD_PING) == 0 ||
+             strcmp(cmdName, CMD_RESET) == 0) {
+    // These commands have no parameters
+    Serial.printf("[CMD] %s received\n", cmdName);
+  } else {
+    Serial.printf("[CMD] Unknown command: %s\n", cmdName);
+    return false;
+  }
+
   return true;
 }
 
-bool waitForMasterAck(uint32_t timeoutMs) {
-  uint32_t startTime = millis();
+// ==================== READY SIGNAL (ASCII) ====================
 
-  Serial.printf("[RX] Waiting for master ACK (timeout=%d ms)...\n", timeoutMs);
+bool sendReadyPacket(uint16_t lux, uint8_t isFallen, uint16_t photoWidth,
+                     uint16_t photoHeight, uint32_t timestamp) {
+  // Send ASCII READY response: simple "READY\n" (no metadata)
+  char readyMsg[ASCII_RESP_MAX_LEN] = {0};
 
-  while (millis() - startTime < timeoutMs) {
-    myTransfer.tick(); // Update SerialTransfer state machine
+  snprintf(readyMsg, ASCII_RESP_MAX_LEN, "%s\n", CMD_READY);
 
-    if (myTransfer.available()) {
-      uint8_t packetID = myTransfer.currentPacketID();
+  Serial.printf("[TX] Sending ASCII READY: %s", readyMsg);
 
-      if (packetID == PACKET_ID_ACK) {
-        AckPacket ack = {0};
-        uint16_t recSize = 0;
-        recSize = myTransfer.rxObj(ack, recSize, sizeof(AckPacket));
+  // Send via simple Serial write (ASCII, NOT SerialTransfer)
+  UART_PORT.write((const uint8_t *)readyMsg, strlen(readyMsg));
+  UART_PORT.flush();
 
-        Serial.printf("[RX] ACK received (command=%d)\n", ack.command);
-        lastPacketTime = millis();
-        masterAckReceived = true;
-        return true;
-      } else {
-        Serial.printf("[RX] Unexpected packet ID (0x%02X), waiting for ACK...\n", packetID);
-      }
+  lastCommandTime = millis();
+  return true;
+}
+
+/**
+ * @brief Check if command has been received and is ready to process
+ * @return true if new command available (call getCommand to retrieve)
+ */
+bool commandAvailable() {
+  // Try to read a complete ASCII line
+  char line[ASCII_CMD_MAX_LEN] = {0};
+  uint16_t lineLen = readAsciiLine(line, ASCII_CMD_MAX_LEN);
+
+  if (lineLen > 0) {
+    // Parse the received command
+    if (parseCommand(line)) {
+      lastCommandTime = millis();
+      return true;
+    } else {
+      // Send error response for invalid command
+      sendErrorMessage(ERR_INVALID_PARAMS);
+      return false;
     }
-
-    delay(10);
   }
 
-  Serial.printf("[RX] ERROR: ACK timeout after %d ms\n", timeoutMs);
   return false;
 }
 
-// ==================== PHOTO TRANSMISSION ====================
+/**
+ * @brief Retrieve the last parsed command
+ * @param outCmd [out] Command structure to fill
+ * @return true if valid command available
+ */
+bool getCommand(PhotoCommand &outCmd) {
+  if (!currentCommand.hasNewCommand) {
+    return false;
+  }
+
+  strncpy(outCmd.cmdName, currentCommand.cmdName, sizeof(outCmd.cmdName) - 1);
+  outCmd.width = currentCommand.width;
+  outCmd.height = currentCommand.height;
+  outCmd.quality = currentCommand.quality;
+
+  currentCommand.hasNewCommand = false;
+  return true;
+}
+
+/**
+ * @brief Send ASCII error message
+ * Format: "ERR:code\n"
+ */
+bool sendErrorMessage(uint8_t errorCode) {
+  char errMsg[ASCII_RESP_MAX_LEN] = {0};
+  snprintf(errMsg, ASCII_RESP_MAX_LEN, "%s:%u\n", CMD_ERR, errorCode);
+
+  Serial.printf("[TX] Sending ASCII ERROR: %s", errMsg);
+
+  UART_PORT.write((const uint8_t *)errMsg, strlen(errMsg));
+  UART_PORT.flush();
+
+  lastCommandTime = millis();
+  return true;
+}
+
+/**
+ * @brief Send ASCII acknowledgment
+ * Format: "ACK:0\n" (success) or "ACK:1\n" (failure)
+ */
+bool sendAckMessage(uint8_t status) {
+  char ackMsg[ASCII_RESP_MAX_LEN] = {0};
+  snprintf(ackMsg, ASCII_RESP_MAX_LEN, "ACK:%u\n", status);
+
+  Serial.printf("[TX] Sending ASCII ACK: %s", ackMsg);
+
+  UART_PORT.write((const uint8_t *)ackMsg, strlen(ackMsg));
+  UART_PORT.flush();
+
+  lastCommandTime = millis();
+  return true;
+}
+
+// ==================== PHOTO TRANSMISSION (BINARY VIA SERIALTRANSFER) ====================
 
 bool sendPhotoChunked(const uint8_t *photoBuffer, uint32_t photoSize, uint8_t quality) {
   if (!photoBuffer || photoSize == 0) {
     Serial.println("[TX] ERROR: Invalid photo buffer");
-    return sendErrorPacket(ERR_INVALID_PARAMS);
+    return sendErrorMessage(ERR_INVALID_PARAMS);
   }
 
   if (photoSize > PHOTO_MAX_SIZE) {
     Serial.printf("[TX] ERROR: Photo too large (%lu > %d bytes)\n", photoSize, PHOTO_MAX_SIZE);
-    return sendErrorPacket(ERR_BUFFER_OVERFLOW);
+    return sendErrorMessage(ERR_BUFFER_OVERFLOW);
   }
+
+  // Set flag to prevent periodic READY from corrupting binary photo stream
+  inPhotoTransmission = true;
 
   Serial.printf("[TX] Starting photo transmission: %lu bytes, quality=%d\n", photoSize, quality);
 
   // Calculate chunk parameters
   uint16_t numChunks = (photoSize + PHOTO_CHUNK_SIZE - 3 - 1) / (PHOTO_CHUNK_SIZE - 2);
 
-  // Send PHOTO_HEADER first
+  // Send PHOTO_HEADER packet (BINARY via SerialTransfer)
   PhotoHeader header;
   header.totalSize = photoSize;
   header.numChunks = numChunks;
   header.quality = quality;
   header.reserved = 0;
 
-  Serial.printf("[TX] Sending PHOTO_HEADER: size=%lu bytes, chunks=%d\n",
+  Serial.printf("[TX] Sending PHOTO_HEADER via SerialTransfer: size=%lu bytes, chunks=%d\n",
                 header.totalSize, header.numChunks);
 
   uint16_t sendSize = 0;
-  sendSize = myTransfer.txObj(header, sendSize, sizeof(PhotoHeader));
-  uint8_t status = myTransfer.sendData(sendSize, PACKET_ID_PHOTO_HEADER);
+  sendSize = binaryTransfer.txObj(header, sendSize, sizeof(PhotoHeader));
+  uint8_t status = binaryTransfer.sendData(sendSize, PACKET_ID_PHOTO_HEADER);
 
   if (status == 0) {
     Serial.printf("[TX] ERROR: Failed to send PHOTO_HEADER (status=%d)\n", status);
-    return sendErrorPacket(ERR_GENERIC);
+    return sendErrorMessage(ERR_GENERIC);
   }
 
   delay(100); // Brief pause before streaming chunks
 
-  // Stream photo chunks
+  // Stream photo chunks (BINARY via SerialTransfer)
   uint32_t bytesSent = 0;
 
   for (uint16_t chunkId = 0; chunkId < numChunks; chunkId++) {
@@ -149,33 +318,33 @@ bool sendPhotoChunked(const uint8_t *photoBuffer, uint32_t photoSize, uint8_t qu
 
     if (!sendPhotoChunkWithRetry(chunkId, chunkData, chunkDataLen)) {
       Serial.printf("[TX] ERROR: Failed to send chunk %d after retries\n", chunkId);
-      return sendErrorPacket(ERR_GENERIC);
+      return sendErrorMessage(ERR_GENERIC);
     }
 
     bytesSent += chunkDataLen;
 
-    // Log progress every 10 chunks
+    // Log progress and feed watchdog every 10 chunks
     if ((chunkId + 1) % 10 == 0) {
       Serial.printf("[TX] Progress: %d/%d chunks sent (%lu/%lu bytes)\n",
                     chunkId + 1, numChunks, bytesSent, photoSize);
+      esp_task_wdt_reset(); // Feed watchdog during long transmission
     }
   }
 
   Serial.printf("[TX] All %d chunks sent (%lu bytes)\n", numChunks, bytesSent);
 
-  // Send COMPLETE packet
-  uint8_t completeStatus = 0; // 0 = success
-  sendSize = 0;
-  sendSize = myTransfer.txObj(completeStatus, sendSize, sizeof(uint8_t));
-  status = myTransfer.sendData(sendSize, PACKET_ID_COMPLETE);
+  // Send ASCII DONE response: "DONE:0\n" (status=0 for success)
+  char doneMsg[ASCII_RESP_MAX_LEN] = {0};
+  snprintf(doneMsg, ASCII_RESP_MAX_LEN, "%s:%u\n", CMD_DONE, 0);
 
-  if (status == 0) {
-    Serial.printf("[TX] ERROR: Failed to send COMPLETE packet (status=%d)\n", status);
-    return false;
-  }
+  Serial.printf("[TX] Sending ASCII DONE: %s", doneMsg);
+  UART_PORT.write((const uint8_t *)doneMsg, strlen(doneMsg));
+  UART_PORT.flush();
 
-  Serial.println("[TX] COMPLETE packet sent");
-  lastPacketTime = millis();
+  lastCommandTime = millis();
+
+  // Clear flag to resume periodic READY broadcasts
+  inPhotoTransmission = false;
 
   return true;
 }
@@ -195,106 +364,47 @@ bool sendPhotoChunkWithRetry(uint16_t chunkId, const uint8_t *chunkData,
 
     uint16_t sendSize = 0;
 
-    // Pack chunkId + data
-    sendSize = myTransfer.txObj(chunkId, sendSize, sizeof(uint16_t));
-    sendSize = myTransfer.txObj(chunkData, sendSize, chunkLen);
+    // Pack chunkId + data into PhotoChunk structure
+    sendSize = binaryTransfer.txObj(chunkId, sendSize, sizeof(uint16_t));
+    sendSize = binaryTransfer.txObj(chunkData, sendSize, chunkLen);
 
-    uint8_t status = myTransfer.sendData(sendSize, PACKET_ID_PHOTO_CHUNK);
+    uint8_t status = binaryTransfer.sendData(sendSize, PACKET_ID_PHOTO_CHUNK);
 
     if (status == 0) {
       Serial.printf("[TX] ERROR: Send failed for chunk %d (status=%d)\n", chunkId, status);
       continue;
     }
 
-    // Wait for ACK or next packet
-    masterAckReceived = false;
+    // Wait briefly to allow master to process
     delay(50);
-    myTransfer.tick();
-    processIncomingPackets();
+    binaryTransfer.tick();
 
-    if (masterAckReceived || attempt == maxRetries - 1) {
-      // Either ACK received or last attempt
-      lastPacketTime = millis();
-      return true;
-    }
+    lastCommandTime = millis();
+    return true;
   }
 
   return false;
 }
 
-// ==================== ERROR HANDLING ====================
-
-bool sendErrorPacket(uint8_t errorCode, const uint8_t *details) {
-  Serial.printf("[TX] Sending ERROR packet (code=%d)\n", errorCode);
-
-  ErrorPacket errPkt;
-  errPkt.errorCode = errorCode;
-
-  if (details) {
-    errPkt.details[0] = details[0];
-    errPkt.details[1] = details[1];
-    errPkt.details[2] = details[2];
-  } else {
-    errPkt.details[0] = 0;
-    errPkt.details[1] = 0;
-    errPkt.details[2] = 0;
-  }
-
-  uint16_t sendSize = 0;
-  sendSize = myTransfer.txObj(errPkt, sendSize, sizeof(ErrorPacket));
-  uint8_t status = myTransfer.sendData(sendSize, PACKET_ID_ERROR);
-
-  return (status != 0);
-}
-
-void processIncomingPackets() {
-  myTransfer.tick(); // Non-blocking update
-
-  if (!myTransfer.available()) {
-    return;
-  }
-
-  uint8_t packetID = myTransfer.currentPacketID();
-
-  switch (packetID) {
-  case PACKET_ID_ACK: {
-    Serial.println("[RX] ACK received");
-    masterAckReceived = true;
-    break;
-  }
-
-  case PACKET_ID_ERROR: {
-    ErrorPacket errPkt;
-    uint16_t recSize = 0;
-    recSize = myTransfer.rxObj(errPkt, recSize, sizeof(ErrorPacket));
-    Serial.printf("[RX] ERROR from master (code=%d)\n", errPkt.errorCode);
-    break;
-  }
-
-  default: {
-    Serial.printf("[RX] Unexpected packet ID (0x%02X)\n", packetID);
-    break;
-  }
-  }
-
-  lastPacketTime = millis();
-}
-
+/**
+ * @brief Check if master is still connected (based on recent activity)
+ */
 bool isMasterAlive() {
-  return (millis() - lastPacketTime) < SERIAL_TIMEOUT_MS;
+  return (millis() - lastCommandTime) < SERIAL_CHUNK_TIMEOUT_MS;
 }
 
 // ==================== DIAGNOSTICS ====================
 
 void diagnosticUARTStatus() {
-  Serial.println("\n[DIAG] UART Status:");
+  Serial.println("\n[DIAG] UART/SerialTransfer Status:");
   Serial.printf("  Port:             Serial2 (UART1)\n");
   Serial.printf("  TX Pin:           GPIO%d\n", UART_TX_PIN);
   Serial.printf("  RX Pin:           GPIO%d\n", UART_RX_PIN);
   Serial.printf("  Baud Rate:        %d\n", UART_BAUD_RATE);
-  Serial.printf("  Last Packet:      %lu ms ago\n", millis() - lastPacketTime);
+  Serial.printf("  Last Command:     %lu ms ago\n", millis() - lastCommandTime);
   Serial.printf("  Master Alive:     %s\n", isMasterAlive() ? "YES" : "NO (TIMEOUT)");
-  Serial.printf("  ACK Received:     %s\n", masterAckReceived ? "YES" : "NO");
+  Serial.println("  Protocol Mode:    HYBRID (ASCII commands + SerialTransfer image data)");
+  Serial.printf("  ASCII Buffer:     %d/%d bytes used\n", asciiLineIdx, ASCII_CMD_MAX_LEN);
   Serial.println();
 }
 

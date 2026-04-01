@@ -1,17 +1,27 @@
 /**
  * @file      serialtransfer_protocol.h
- * @brief     SerialTransfer protocol definitions for ESP32-CAM (slave) ↔ LilyGo (master) communication
+ * @brief     Dual-mode protocol: ASCII commands + SerialTransfer binary image data
  * @license   MIT
  * @copyright Copyright (c) 2026
- * @date      2026-03-21
- * @note      Shared by both slave and master; defines packet types, metadata structs, and constants
+ * @date      2026-03-31
+ * @note      Hybrid protocol for ESP32-CAM (slave) ↔ LilyGo (master) communication
  *
- * SerialTransfer handles packet framing automatically:
- * [START_BYTE(0x7E)][PACKET_ID][COBS_OVH][LENGTH][PAYLOAD...][CRC8][STOP_BYTE(0x81)]
+ * PROTOCOL ARCHITECTURE:
+ * - Commands & responses: ASCII text (simple serial, line-terminated with \n)
+ * - Image data: Binary packets via SerialTransfer library (COBS encoding, CRC8)
+ *
+ * ASCII Command Format (Slave → Master):
+ *   Lines terminated with \n (0x0A)
+ *   Examples: "READY:250:0:160000000\n", "ERR:2\n", "DONE:0\n"
+ *
+ * SerialTransfer Binary Format (Image transmission only):
+ *   [START_BYTE(0x7E)][PACKET_ID][COBS_OVH][LENGTH][PAYLOAD...][CRC8][STOP_BYTE(0x81)]
+ *   PACKET_ID values: 0x03 (HEADER), 0x04 (CHUNK)
  *
  * This header defines:
- * - Packet ID constants (semantic meaning of each message type)
- * - Data structures for the payload
+ * - ASCII command/response strings
+ * - Binary packet IDs (image data only)
+ * - Data structures for image payload
  * - Timeouts and retry parameters
  */
 
@@ -22,42 +32,48 @@
 #include <cstddef>
 #include <cstdint>
 
-// ==================== PACKET ID DEFINITIONS ====================
-// Packet IDs (1 byte, assigned to SerialTransfer's packetID field)
+// ==================== ASCII COMMAND DEFINITIONS ====================
+// Commands and responses are plain text, terminated with \n (0x0A)
+// Format: "COMMAND:param1:param2:...\n"
 
-#define PACKET_ID_READY 0x01        /**< Slave → Master: Camera ready with metadata (PhotoMetadata) */
-#define PACKET_ID_ACK 0x02          /**< Master → Slave: Acknowledge command (AckPacket) */
-#define PACKET_ID_PHOTO_HEADER 0x03 /**< Slave → Master: Photo dimensions and chunk count (PhotoHeader) */
-#define PACKET_ID_PHOTO_CHUNK 0x04  /**< Slave → Master: Photo data chunk (PhotoChunk) */
-#define PACKET_ID_COMPLETE 0x05     /**< Slave → Master: Photo transmission complete (uint8_t status) */
-#define PACKET_ID_ERROR 0xFE        /**< Error packet: (ErrorPacket) */
+// ---- Slave → Master ----
+#define CMD_READY "READY" /**< Format: "READY:lux:fall:timestamp:width:height\n" */
+#define CMD_DONE "DONE"   /**< Format: "DONE:status\n" (status: 0=success, other=error) */
+#define CMD_ERR "ERR"     /**< Format: "ERR:code\n" */
+
+// ---- Master → Slave ----
+#define CMD_PHOTO "PHOTO" /**< Format: "PHOTO:width:height:quality\n" */
+#define CMD_STAT "STAT"   /**< Format: "STAT\n" - Request status */
+#define CMD_PING "PING"   /**< Format: "PING\n" - Heartbeat check */
+#define CMD_RESET "RESET" /**< Format: "RESET\n" - Abort and reset */
+
+// ASCII response suffixes (append to command prefix with ':')
+#define RESP_OK ":0"   /**< Success response suffix */
+#define RESP_FAIL ":1" /**< Failure response suffix */
+
+// ==================== BINARY PACKET ID DEFINITIONS ====================
+// Packet IDs used ONLY for image data streaming via SerialTransfer
+// Image metadata and command acks now use ASCII text
+
+#define PACKET_ID_PHOTO_HEADER 0x03 /**< Slave → Master: Photo dimensions (binary struct) */
+#define PACKET_ID_PHOTO_CHUNK 0x04  /**< Slave → Master: Photo data chunk (binary struct) */
+#define PACKET_ID_ERROR 0xFE        /**< Optional: Binary error details (reserved) */
 
 // ==================== TIMING & RETRY PARAMETERS ====================
 
-#define SERIAL_TIMEOUT_MS 5000 /**< Max time to wait for incoming SerialTransfer packet */
-#define RETRY_MAX_ATTEMPTS 3   /**< Maximum retries for failed transmissions */
-#define RETRY_BACKOFF_MS 500   /**< Delay between retries (ms) */
+#define ASCII_RESPONSE_TIMEOUT_MS 2000 /**< Max time to wait for ASCII response (commands) */
+#define SERIAL_CHUNK_TIMEOUT_MS 5000   /**< Max time to wait for incoming SerialTransfer chunk */
+#define RETRY_MAX_ATTEMPTS 3           /**< Maximum retries for failed chunk transmissions */
+#define RETRY_BACKOFF_MS 500           /**< Delay between retries (ms) */
 
 #define PHOTO_CHUNK_SIZE 250  /**< Payload size per photo chunk (max 254 for SerialTransfer) */
 #define PHOTO_MAX_SIZE 400000 /**< Max photo size (400 KB) */
 
+// ==================== ASCII BUFFER SIZES ====================
+#define ASCII_CMD_MAX_LEN 64   /**< Max length of ASCII command line (including \n) */
+#define ASCII_RESP_MAX_LEN 128 /**< Max length of ASCII response line */
+
 // ==================== DATA STRUCTURES ====================
-
-/**
- * @struct PhotoMetadata
- * @brief Metadata sent with READY packet (PACKET_ID_READY)
- * Slave → Master: announces readiness and sensor data
- */
-struct PhotoMetadata {
-  uint16_t luxValue;    /**< Light intensity (LUX) from ambient light sensor */
-  uint8_t isFallen;     /**< Fall detection: 1=fallen, 0=not fallen */
-  uint16_t photoWidth;  /**< Camera capture width (pixels) */
-  uint16_t photoHeight; /**< Camera capture height (pixels) */
-  uint32_t timestamp;   /**< Epoch time or system uptime (seconds) */
-} __attribute__((packed));
-
-static_assert(sizeof(PhotoMetadata) <= PHOTO_CHUNK_SIZE,
-              "PhotoMetadata must fit in single SerialTransfer packet");
 
 /**
  * @struct PhotoHeader
@@ -88,40 +104,25 @@ struct PhotoChunk {
 static_assert(sizeof(PhotoChunk) <= PHOTO_CHUNK_SIZE,
               "PhotoChunk must fit in single SerialTransfer packet");
 
-/**
- * @struct AckPacket
- * @brief Acknowledgment from Master to Slave (PACKET_ID_ACK)
- * Master → Slave: confirm receipt or request retry
- */
-struct AckPacket {
-  uint8_t command;     /**< Command: 0x00=ready for photo, 0x01=resend last chunk */
-  uint8_t reserved[3]; /**< Reserved for future use */
-} __attribute__((packed));
-
-static_assert(sizeof(AckPacket) <= PHOTO_CHUNK_SIZE,
-              "AckPacket must fit in single SerialTransfer packet");
-
-/**
- * @struct ErrorPacket
- * @brief Error notification (PACKET_ID_ERROR)
- * Slave → Master or Master → Slave: report error condition
- */
-struct ErrorPacket {
-  uint8_t errorCode;  /**< Error code (0=generic, 1=timeout, 2=crc_error, 3=invalid_params) */
-  uint8_t details[3]; /**< Error-specific details */
-} __attribute__((packed));
-
-static_assert(sizeof(ErrorPacket) <= PHOTO_CHUNK_SIZE,
-              "ErrorPacket must fit in single SerialTransfer packet");
-
 // ==================== ERROR CODES ====================
+// Error codes used in ASCII "ERR:code" responses and optionally in binary error packets
 
-#define ERR_NONE 0
-#define ERR_GENERIC 1
-#define ERR_TIMEOUT 2
-#define ERR_CRC_ERROR 3
-#define ERR_INVALID_PARAMS 4
-#define ERR_BUFFER_OVERFLOW 5
-#define ERR_CAMERA_FAIL 6
+#define ERR_NONE 0            /**< No error */
+#define ERR_TIMEOUT 1         /**< Communication timeout */
+#define ERR_INVALID_PARAMS 2  /**< Invalid command parameters (e.g., resolution > max) */
+#define ERR_CAMERA_FAIL 3     /**< Camera capture failed */
+#define ERR_BUFFER_OVERFLOW 4 /**< Photo size exceeds buffer capacity */
+#define ERR_CRC_ERROR 5       /**< CRC validation failed on chunk */
+#define ERR_GENERIC 6         /**< Generic/unknown error */
+
+// ==================== FRAME SIZE & QUALITY CONSTRAINTS ====================
+// Valid ranges for photo parameters sent in PHOTO command
+
+#define PHOTO_WIDTH_MIN 320
+#define PHOTO_WIDTH_MAX 1600
+#define PHOTO_HEIGHT_MIN 240
+#define PHOTO_HEIGHT_MAX 1200
+#define PHOTO_QUALITY_MIN 1
+#define PHOTO_QUALITY_MAX 63
 
 #endif // SERIALTRANSFER_PROTOCOL_H_

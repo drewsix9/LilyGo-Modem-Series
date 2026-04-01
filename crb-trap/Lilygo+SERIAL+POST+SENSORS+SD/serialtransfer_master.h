@@ -1,17 +1,18 @@
 /**
  * @file      serialtransfer_master.h
- * @brief     SerialTransfer protocol handler for LilyGo master
+ * @brief     Hybrid protocol handler for LilyGo master:
+ *            ASCII commands + SerialTransfer binary image data
  * @license   MIT
  * @copyright Copyright (c) 2026
- * @date      2026-03-21
- * @note      Handles UART communication with ESP32-CAM slave via SerialTransfer library
+ * @date      2026-03-31
+ * @note      Commands use simple serial (text), image chunks use SerialTransfer (binary)
  *
  * Responsibilities:
  *  - Initialize UART and SerialTransfer on master side
- *  - Wait for READY packet with sensor metadata from slave
- *  - Receive photo chunks and reassemble into complete image
- *  - Validate CRC and handle retries
- *  - Send ACK and command packets to slave
+ *  - Parse ASCII READY message with sensor metadata from slave
+ *  - Send ASCII PHOTO command to slave
+ *  - Receive binary photo chunks via SerialTransfer and reassemble
+ *  - Validate JPEG and handle retries
  */
 
 #ifndef SERIALTRANSFER_MASTER_H_
@@ -24,57 +25,66 @@
 
 /**
  * @brief Initialize UART and SerialTransfer on master
+ * SerialTransfer is configured in BINARY mode (for image chunks only)
+ * ASCII commands are sent via simple UART writes
+ *
  * @param txPin GPIO pin for UART TX (e.g., 18 on LilyGo)
  * @param rxPin GPIO pin for UART RX (e.g., 19 on LilyGo)
  * @return true if initialized successfully, false if failed
  */
 bool initMasterSerialTransfer(uint8_t txPin = 18, uint8_t rxPin = 19);
 
-// ==================== SLAVE DISCOVERY & READINESS ====================
+// ==================== SLAVE DISCOVERY & READINESS (ASCII) ====================
 
 /**
- * @brief Wait for READY packet from slave (blocking with timeout)
- * Reads sensor metadata from slave to determine LUX, fall status, etc.
+ * @brief Wait for ASCII READY message from slave (blocking with timeout)
+ * Format: "READY:lux:fall:timestamp:width:height\n"
  *
- * @param metadata Output parameter: populated with PhotoMetadata from slave
- * @param timeoutMs Max time to wait for READY packet
- * @return true if READY received and metadata extracted, false on timeout
+ * @param timeoutMs Max time to wait for READY message
+ * @return true if READY received and parsed, false on timeout
  */
-bool waitForSlaveReady(PhotoMetadata &metadata, uint32_t timeoutMs = SERIAL_TIMEOUT_MS);
+bool waitForSlaveReady(uint32_t timeoutMs = ASCII_RESPONSE_TIMEOUT_MS);
 
-// ==================== PHOTO RECEPTION ====================
+// ==================== PHOTO COMMAND (ASCII) ====================
 
 /**
- * @brief Send ACK command to slave to start photo transmission
- * Master → Slave: sends command (0x00=ready for photo)
- * @return true if ACK sent successfully
+ * @brief Send ASCII PHOTO command to slave
+ * Format: "PHOTO:width:height:quality\n"
+ * Master → Slave: triggers photo capture at specified parameters
+ *
+ * @param width Requested photo width (pixels)
+ * @param height Requested photo height (pixels)
+ * @param quality JPEG quality (1-63)
+ * @return true if command sent successfully
  */
-bool sendSlaveACK();
+bool sendPhotoCommand(uint16_t width, uint16_t height, uint8_t quality);
+
+// ==================== PHOTO RECEPTION (BINARY VIA SERIALTRANSFER) ====================
 
 /**
  * @brief Receive photo chunks and reassemble complete image
- * Master → Slave communication:
- * 1. Receive PHOTO_HEADER (total size, chunk count)
+ * Sequence:
+ * 1. Receive PHOTO_HEADER packet (binary via SerialTransfer)
  * 2. Allocate buffer
- * 3. Loop: receive PHOTO_CHUNK packets
- * 4. Verify CRC on complete photo
- * 5. Receive COMPLETE packet
+ * 3. Loop: receive PHOTO_CHUNK packets with retry logic
+ * 4. Verify JPEG SOI marker
+ * 5. Wait for ASCII "DONE:0\n" confirmation
  *
  * Buffer is dynamically allocated; caller must free() after use
  *
  * @param outBuffer Output parameter: pointer to allocated photo buffer
  * @param outSize Output parameter: total photo size in bytes
- * @return true if photo completely received and CRC valid, false on error
+ * @return true if photo completely received and valid, false on error
  */
 bool receivePhotoChunked(uint8_t *&outBuffer, uint32_t &outSize);
 
 /**
- * @brief Receive a single photo chunk (blocking)
+ * @brief Receive a single photo chunk via SerialTransfer (blocking)
  * @param chunkId Output: sequence number of this chunk
- * @param chunkData Output: pointer to chunk payload data
+ * @param chunkData Output: pointer to chunk payload data (dynamically allocated)
  * @param chunkLen Output: length of chunk data
- * @param maxRetries Number of retries if CRC fails
- * @return true if chunk received with valid CRC, false on error
+ * @param maxRetries Number of retries if reception timeout
+ * @return true if chunk received successfully, false on error
  */
 bool receivePhotoChunkWithRetry(uint16_t &chunkId, uint8_t *&chunkData,
                                 size_t &chunkLen, uint8_t maxRetries = RETRY_MAX_ATTEMPTS);
@@ -97,29 +107,13 @@ bool validateJpegPhoto(const uint8_t *buffer, uint32_t size);
  */
 uint32_t crc32Photo(const uint8_t *buffer, uint32_t size);
 
-// ==================== ERROR HANDLING ====================
+// ==================== STATUS & DIAGNOSTICS ====================
 
 /**
- * @brief Send error packet to slave
- * @param errorCode Error code (ERR_*)
- * @param details Optional error details (3 bytes)
- * @return true if sent
- */
-bool sendSlaveError(uint8_t errorCode, const uint8_t *details = nullptr);
-
-/**
- * @brief Check for and handle incoming slave packets
- * Non-blocking; updates module state if packet received
- */
-void processIncomingSlavePackets();
-
-/**
- * @brief Check if slave connection is alive (got packet within timeout)
- * @return true if last packet received within SERIAL_TIMEOUT_MS
+ * @brief Check if slave connection is alive (based on recent activity)
+ * @return true if last activity within SERIAL_CHUNK_TIMEOUT_MS
  */
 bool isSlaveAlive();
-
-// ==================== CLEANUP ====================
 
 /**
  * @brief Free dynamically allocated photo buffer
@@ -127,11 +121,16 @@ bool isSlaveAlive();
  */
 void freePhotoBuffer();
 
-// ==================== DIAGNOSTICS ====================
-
 /**
- * @brief Log UART and master status to Serial
+ * @brief Log UART, protocol, and master status to Serial
  */
 void diagnosticMasterUARTStatus();
+
+/**
+ * @brief Purge any remaining ASCII bytes from UART buffer
+ * Used to clear residual data after ASCII mode transitions to binary mode
+ * Prevents stale ASCII bytes from corrupting binary packet reception
+ */
+void purgeUARTBuffer();
 
 #endif // SERIALTRANSFER_MASTER_H_
