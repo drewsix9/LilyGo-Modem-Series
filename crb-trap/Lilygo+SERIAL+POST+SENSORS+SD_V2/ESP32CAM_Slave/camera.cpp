@@ -7,9 +7,9 @@
  */
 
 #include "camera.h"
-#include "espnow_protocol.h" // for PKT_ERROR / ERR_* codes
-#include "espnow_slave.h"    // for espnowSendReliable() (used to send error packets)
-#include "sdcard.h"          // for SD card photo persistence
+#include "sdcard.h"        // for SD card photo persistence
+#include "uart_protocol.h" // for ERR_* codes
+#include "uart_slave.h"    // for ASCII ERROR signaling and photo transfer
 #include <Arduino.h>
 
 // ==================== GLOBAL STATE ====================
@@ -138,17 +138,13 @@ bool captureAndSendPhoto(uint16_t lux, uint16_t width, uint16_t height, uint8_t 
     return false;
   }
 
-  sensor_t *s = esp_camera_sensor_get();
-  if (!s) {
-    Serial.println("[CAM] ERROR: Failed to get sensor");
-    return false;
-  }
-
-  // Apply requested resolution and quality
+  // NOTE: Runtime OV2640 register reconfiguration (set_framesize/set_quality)
+  // is causing an ESP32 Arduino-ESP-IDF divide-by-zero panic in SCCB I2C timing
+  // on this hardware/firmware combination. Keep capture settings fixed from init.
   framesize_t targetSize = selectFrameSize(width, height);
-  s->set_framesize(s, targetSize);
-  s->set_quality(s, quality);
-  Serial.printf("[CAM] Settings: Size=%dx%d, Quality=%d\n", width, height, quality);
+  (void)targetSize;
+  Serial.printf("[CAM] Requested settings: Size=%dx%d, Quality=%d (using init-time sensor config)\n",
+                width, height, quality);
   delay(500);
 
   // Control flash based on ambient light
@@ -218,7 +214,8 @@ bool captureAndSendPhoto(uint16_t lux, uint16_t width, uint16_t height, uint8_t 
 
     // Second valid frame — use it
     if (soiOffset > 0) {
-      temp->buf += soiOffset;
+      // Keep fb->buf base pointer unchanged so esp_camera_fb_return remains safe.
+      memmove(temp->buf, temp->buf + soiOffset, temp->len - soiOffset);
       temp->len -= soiOffset;
       Serial.printf("[CAM] Adjusted buffer: skipped %u bytes of DMA padding\n", soiOffset);
     }
@@ -235,22 +232,22 @@ bool captureAndSendPhoto(uint16_t lux, uint16_t width, uint16_t height, uint8_t 
 
   if (!fb) {
     Serial.println("[CAM] ERROR: Capture failed after all attempts");
-    uint8_t errPkt[2] = {PKT_ERROR, ERR_CAPTURE_FAILED};
+    uint8_t errPkt[2] = {0xF0, ERR_CAPTURE_FAILED};
     espnowSendReliable(errPkt, sizeof(errPkt));
     return false;
   }
 
   Serial.printf("[CAM] Image captured: %u bytes\n", fb->len);
 
-  // Optionally save photo to SD card before sending via ESP-NOW
+  // Optionally save photo to SD card before sending via UART
   if (saveToDisk) {
     if (isSDAvailable()) {
       bool sdSaveSuccess = savePhotoToSD(fb->buf, fb->len);
       if (!sdSaveSuccess) {
-        Serial.println("[SD] WARN: Photo save to SD failed, continuing with ESP-NOW send");
+        Serial.println("[SD] WARN: Photo save to SD failed, continuing with UART send");
       }
     } else {
-      Serial.println("[SD] SD card not available, skipping archive (ESP-NOW send only)");
+      Serial.println("[SD] SD card not available, skipping archive (UART send only)");
     }
   }
 
@@ -258,10 +255,10 @@ bool captureAndSendPhoto(uint16_t lux, uint16_t width, uint16_t height, uint8_t 
   esp_camera_fb_return(fb);
 
   if (success) {
-    Serial.println("[ESPNOW] Photo transmission complete");
+    Serial.println("[UART] Photo transmission complete");
   } else {
-    Serial.println("[ESPNOW] Photo transmission failed");
-    uint8_t errPkt[2] = {PKT_ERROR, ERR_SEND_FAILED};
+    Serial.println("[UART] Photo transmission failed");
+    uint8_t errPkt[2] = {0xF0, ERR_SEND_FAILED};
     espnowSendReliable(errPkt, sizeof(errPkt));
   }
 

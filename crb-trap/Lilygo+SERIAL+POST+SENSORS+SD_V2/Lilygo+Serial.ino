@@ -1,10 +1,10 @@
 /**
  * @file      Lilygo+CamESPNOW.ino
- * @author    Modified for ESP-NOW camera control
+ * @author    Modified for UART hybrid camera control
  * @license   MIT
  * @copyright Copyright (c) 2026
  * @date      2026-03-06
- * @note      LilyGo A7670 Master — Controls ESP32CAM via ESP-NOW (wireless, no UART wires)
+ * @note      LilyGo A7670 Master — Controls ESP32CAM via UART (ASCII + SerialTransfer)
  *
  * Hardware Setup:
  *  - LILYGO_T_A7670 board (ESP32 Master)
@@ -14,17 +14,17 @@
  *
  * Module layout:
  *  utilities.h       — Board pin definitions (LILYGO_T_A7670)
- *  espnow_protocol.h — ESP-NOW packet types, CRC32, shared constants
+ *  uart_protocol.h — Shared UART protocol constants and CRC32
  *  power_manager.h   — Camera GPIO control and deep-sleep entry
- *  espnow_master.h   — WiFi AP, ESP-NOW init, slave pairing, photo RX
+ *  uart_master.h   — UART init, ASCII command flow, binary photo RX
  *  sensor.h          — Ambient light (LUX) reading
  */
 
-#include "espnow_master.h"
-#include "espnow_protocol.h"
 #include "http_upload.h"
 #include "power_manager.h"
 #include "sensor.h"
+#include "uart_master.h"
+#include "uart_protocol.h"
 #include "utilities.h"
 
 #include <Wire.h>
@@ -44,10 +44,10 @@ void setup() {
   delay(100);
 
   Serial.println("\n===========================================");
-  Serial.println("LILYGO A7670 - Camera ESP-NOW Master");
+  Serial.println("LILYGO A7670 - Camera UART Master");
   Serial.println("===========================================");
   Serial.println("[PINS] GPIO23->CAM_POWER (LOW=ON), GPIO32->PIR_WAKEUP");
-  Serial.println("[COMM] ESP-NOW wireless (no UART wires)");
+  Serial.println("[COMM] UART hybrid (ASCII command + binary chunks)");
 
   print_wakeup_reason();
 
@@ -90,7 +90,7 @@ void setup() {
     Serial.printf("[MEMORY] Before camera: Free PSRAM: %u bytes, Free heap: %u bytes\n",
                   ESP.getFreePsram(), ESP.getFreeHeap());
 
-    // Start WiFi AP + ESP-NOW before powering camera so slave can find us
+    // Initialize UART transport before powering camera
     initESPNOW();
 
     powerOnCamera();
@@ -102,9 +102,9 @@ void setup() {
     capturedLuxValue = luxValue;
     capturedIsFallen = isFallen;
 
-    Serial.println("[ESPNOW] Waiting for camera READY signal...");
+    Serial.println("[UART] Waiting for camera READY signal...");
     if (waitForCameraReady()) {
-      Serial.println("[ESPNOW] Camera is READY");
+      Serial.println("[UART] Camera is READY");
 
       bool photoSuccess = false;
       for (int attempt = 1; attempt <= PHOTO_MAX_RETRIES && !photoSuccess; attempt++) {
@@ -169,8 +169,7 @@ void setup() {
   Serial.println("\n[CONFIG] System configuration:");
   Serial.println("  - Wakeup source: GPIO32 (PIR Sensor)");
   Serial.println("  - Camera power:  GPIO23 (LOW=ON, HIGH=OFF - inverted logic)");
-  Serial.println("  - Communication: ESP-NOW (wireless, no UART wires)");
-  Serial.printf("  - Master AP:     %s (channel %d)\n", MASTER_AP_SSID, ESPNOW_CHANNEL);
+  Serial.println("  - Communication: UART (GPIO18 TX -> GPIO16 RX, GPIO19 RX <- GPIO4 TX)");
   Serial.printf("  - Photo size:    %dx%d, Quality: %d\n",
                 PHOTO_WIDTH, PHOTO_HEIGHT, PHOTO_QUALITY);
   Serial.printf("[MEMORY] Before sleep: Free PSRAM: %u bytes, Free heap: %u bytes\n",

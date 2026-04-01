@@ -2,7 +2,7 @@
  * @file      camera.h
  * @brief     Camera initialisation, capture, and flash LED control for the
  *            AI-Thinker ESP32-CAM slave.
- *            Internally uses espnow_slave.h to send error packets when capture fails.
+ *            Internally uses uart_slave.h for UART error and photo transfer.
  * @license   MIT
  * @copyright Copyright (c) 2026
  */
@@ -51,10 +51,10 @@ void initializeSCCBBus();
 bool initCamera(framesize_t frameSize, uint8_t jpegQuality);
 
 /**
- * @brief Capture a JPEG photo, optionally save to SD card, and stream to master via ESP-NOW.
+ * @brief Capture a JPEG photo, optionally save to SD card, and stream to master via UART.
  *        Controls the flash LED based on the ambient lux value.
- *        If SD save is requested and fails, system gracefully continues with ESP-NOW send.
- *        On capture failure, sends a PKT_ERROR packet to the master.
+ *        If SD save is requested and fails, system gracefully continues with UART send.
+ *        On capture failure, sends an ASCII ERROR message to the master.
  * @param lux     Ambient light level for flash-brightness calculation.
  * @param width   Requested frame width (used to select framesize).
  * @param height  Requested frame height.
