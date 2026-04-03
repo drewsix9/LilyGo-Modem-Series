@@ -9,6 +9,7 @@
 #include "http_upload.h"
 #include "utilities.h"
 #include <TinyGsmClient.h>
+#include <base64.h>
 
 #ifndef SUPABASE_URL
 #error "SUPABASE_URL is not defined"
@@ -22,6 +23,17 @@
 
 static TinyGsm modem(SerialAT);
 static bool modemInitialized = false;
+
+static uint32_t calculateCRC32(const uint8_t *data, uint32_t length) {
+  uint32_t crc = 0xFFFFFFFF;
+  for (uint32_t i = 0; i < length; i++) {
+    crc ^= data[i];
+    for (int j = 0; j < 8; j++) {
+      crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320UL : 0);
+    }
+  }
+  return crc ^ 0xFFFFFFFF;
+}
 
 // ==================== MODEM INITIALISATION ====================
 
@@ -149,6 +161,25 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
 
   Serial.printf("[HTTP] Uploading %u bytes to Supabase...\n", photoSize);
 
+  uint32_t photoCRC = calculateCRC32(photoData, photoSize);
+  char crcHex[9] = {0};
+  snprintf(crcHex, sizeof(crcHex), "%08lX", (unsigned long)photoCRC);
+  Serial.printf("[HTTP] Photo CRC32: %s\n", crcHex);
+
+  // Base64-encode payload to avoid modem character set remapping of binary bytes.
+  const size_t encodedSize = 4 * ((photoSize + 2) / 3);
+  String encodedPhoto = base64::encode(photoData, photoSize);
+  if (encodedPhoto.length() == 0) {
+    Serial.println("[HTTP] Base64 encoding failed");
+    return -1;
+  }
+  Serial.printf("[HTTP] Base64 size: %u -> %u bytes\n", (unsigned)photoSize,
+                (unsigned)encodedPhoto.length());
+  if (encodedPhoto.length() != encodedSize) {
+    Serial.printf("[HTTP] Warning: expected base64 size %u, got %u\n",
+                  (unsigned)encodedSize, (unsigned)encodedPhoto.length());
+  }
+
   // ---- Initialise HTTPS service (AT+HTTPINIT) ----
   if (!modem.https_begin()) {
     Serial.println("[HTTP] HTTPS init failed");
@@ -165,6 +196,7 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
   urlWithParams += "&is_fallen=" + String(meta.isFallen);
   urlWithParams += "&battery_voltage=" + String(meta.batteryVoltage);
   urlWithParams += "&api_key=" + String(SUPABASE_API_KEY);
+  urlWithParams += "&image_crc32=" + String(crcHex);
 
   // ---- Set endpoint URL with parameters ----
   Serial.printf("[HTTP] Setting URL: %s\n", urlWithParams.c_str());
@@ -175,18 +207,22 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
   }
 
   // ---- Content type ----
-  if (!modem.https_set_content_type("image/jpeg")) {
+  if (!modem.https_set_content_type("text/plain")) {
     Serial.println("[HTTP] Failed to set content type");
   }
 
   Serial.println("[HTTP] Metadata sent via query parameters");
 
-  // ---- POST the binary JPEG body ----
+  // ---- POST the Base64 JPEG body ----
   // TinyGsmHttpsComm (A7670) has no body-size cap.
   // Internally: AT+HTTPDATA=<size>,10000 → DOWNLOAD → stream.write() → OK
   //             AT+HTTPACTION=1 → +HTTPACTION: 1,<status>,<len>
-  // The 10 s HTTPDATA timeout is sufficient for images ≤ ~100 KB at 115200 baud.
-  int httpCode = modem.https_post((const char *)photoData, (size_t)photoSize);
+  // The 10 s HTTPDATA timeout is usually sufficient for small payloads at 115200 baud.
+  int httpCode =
+      modem.https_post(encodedPhoto.c_str(), (size_t)encodedPhoto.length());
+
+  // Release temporary Base64 buffer as soon as transfer completes.
+  encodedPhoto = "";
 
   if (httpCode == 200 || httpCode == 201) {
     Serial.printf("[HTTP] Upload success! HTTP %d\n", httpCode);
