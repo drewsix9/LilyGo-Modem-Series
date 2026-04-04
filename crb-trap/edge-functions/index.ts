@@ -5,7 +5,8 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Authorization, x-api-key, x-image-crc32",
 };
 
 interface UploadResponse {
@@ -13,7 +14,48 @@ interface UploadResponse {
   message: string;
   image_upload_id?: string;
   detection_result_id?: string;
+  expected_crc32?: string;
+  computed_crc32?: string;
   error?: string;
+}
+
+// CRC32 (IEEE 802.3 / poly 0xEDB88320) - same algorithm used in your firmware
+function calculateCRC32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+
+  for (let i = 0; i < bytes.length; i++) {
+    crc ^= bytes[i];
+    for (let j = 0; j < 8; j++) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function toHex8(v: number): string {
+  return v.toString(16).toUpperCase().padStart(8, "0");
+}
+
+function normalizeCrcHex(input: string | null): string | null {
+  if (!input) return null;
+  const normalized = input.trim().toUpperCase().replace(/^0X/, "");
+  return normalized;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).toUpperCase().padStart(2, "0"))
+    .join(" ");
+}
+
+function decodeBase64ToBytes(base64Text: string): Uint8Array {
+  const binaryString = atob(base64Text);
+  const out = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    out[i] = binaryString.charCodeAt(i);
+  }
+  return out;
 }
 
 Deno.serve(async (req) => {
@@ -35,7 +77,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    console.log(`[${new Date().toISOString()}] Received ${req.method} request`);
+    console.log(`[${new Date().toISOString()}] Incoming upload request...`);
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -66,7 +108,11 @@ Deno.serve(async (req) => {
     const batteryVoltageStr =
       params.get("battery_voltage") || req.headers.get("x-battery-voltage");
     const apiKey = params.get("api_key") || req.headers.get("x-api-key");
-    const contentType = req.headers.get("content-type") || "image/jpeg";
+    const expectedCrc32 = normalizeCrcHex(
+      params.get("image_crc32") || req.headers.get("x-image-crc32"),
+    );
+    const contentType =
+      req.headers.get("content-type") || "application/octet-stream";
 
     // Parse numeric values
     const ldrValue = ldrValueStr ? Number(ldrValueStr) : null;
@@ -76,7 +122,7 @@ Deno.serve(async (req) => {
     const gpsLonNum = gpsLon ? Number(gpsLon) : null;
 
     console.log(
-      `Parsed metadata: trapId=${trapId}, capturedAt=${capturedAt}, contentType=${contentType}`,
+      `Parsed metadata: trapId=${trapId}, capturedAt=${capturedAt}, contentType=${contentType}, expectedCrc32=${expectedCrc32 ?? "none"}`,
     );
 
     // Optional simple device auth
@@ -107,11 +153,15 @@ Deno.serve(async (req) => {
       );
     }
 
-    if (!contentType.startsWith("image/")) {
+    if (
+      !contentType.startsWith("image/") &&
+      contentType !== "application/octet-stream" &&
+      contentType !== "text/plain"
+    ) {
       return new Response(
         JSON.stringify({
           success: false,
-          error: `Unsupported content type: ${contentType}`,
+          error: `Unsupported content type: ${contentType}. Use image/*, application/octet-stream, or text/plain`,
         }),
         {
           status: 415,
@@ -120,9 +170,34 @@ Deno.serve(async (req) => {
       );
     }
 
-    const imageBuffer = await req.arrayBuffer();
+    if (!expectedCrc32) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: "Missing required CRC metadata: image_crc32 or x-image-crc32",
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
 
-    if (!imageBuffer || imageBuffer.byteLength === 0) {
+    if (!/^[0-9A-F]{8}$/.test(expectedCrc32)) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: "Invalid CRC32 format. Expected 8 hex chars, e.g. 243F5C18",
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    const rawBodyBuffer = await req.arrayBuffer();
+    if (rawBodyBuffer.byteLength === 0) {
       return new Response(
         JSON.stringify({
           success: false,
@@ -132,6 +207,68 @@ Deno.serve(async (req) => {
           status: 400,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         },
+      );
+    }
+
+    // New firmware sends raw binary JPEG body; legacy firmware sends base64 text.
+    let imageBytes = new Uint8Array(rawBodyBuffer);
+    let effectiveContentType = contentType;
+
+    if (contentType === "text/plain") {
+      const rawText = new TextDecoder().decode(imageBytes).trim();
+      try {
+        imageBytes = decodeBase64ToBytes(rawText);
+        effectiveContentType = "image/jpeg";
+        console.log(
+          `[BODY] Legacy base64 decode succeeded: ${rawText.length} chars -> ${imageBytes.byteLength} bytes`,
+        );
+      } catch (_error) {
+        console.warn(
+          `[BODY] text/plain payload is not valid base64; using raw text bytes (${imageBytes.byteLength} bytes)`,
+        );
+      }
+    } else {
+      console.log(
+        `[BODY] Binary payload received: ${imageBytes.byteLength} bytes`,
+      );
+    }
+
+    const imageBuffer = imageBytes.buffer as ArrayBuffer;
+
+    if (imageBuffer.byteLength === 0) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: "Empty decoded image body",
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    // CRC check immediately after receiving payload
+    const computedCrc32 = toHex8(calculateCRC32(imageBytes));
+
+    const first16 = imageBytes.slice(0, Math.min(16, imageBytes.length));
+    const last16 = imageBytes.slice(Math.max(0, imageBytes.length - 16));
+
+    if (computedCrc32 !== expectedCrc32) {
+      console.error(
+        `[CRC ERROR] Mismatch! Expected: ${expectedCrc32}, Computed: ${computedCrc32}, Size: ${imageBuffer.byteLength}`,
+      );
+      console.info(`[DIAGNOSTIC] First 16 bytes: ${bytesToHex(first16)}`);
+      console.info(`[DIAGNOSTIC] Last 16 bytes: ${bytesToHex(last16)}`);
+      console.info(
+        `[DIAGNOSTIC] Received size: ${imageBuffer.byteLength} bytes`,
+      );
+      console.warn(
+        "[CRC] Continuing upload despite mismatch (diagnostic mode)",
+      );
+    } else {
+      console.log(
+        `[CRC] OK expected=${expectedCrc32} computed=${computedCrc32} bytes=${imageBuffer.byteLength}`,
       );
     }
 
@@ -165,9 +302,9 @@ Deno.serve(async (req) => {
 
     const timestamp = Date.now();
     const ext =
-      contentType === "image/png"
+      effectiveContentType === "image/png"
         ? "png"
-        : contentType === "image/webp"
+        : effectiveContentType === "image/webp"
           ? "webp"
           : "jpg";
     const imageFilename = `${trapId}-${timestamp}.${ext}`;
@@ -178,7 +315,11 @@ Deno.serve(async (req) => {
     const { error: storageError } = await supabase.storage
       .from("trap-images")
       .upload(imagePath, imageBuffer, {
-        contentType,
+        contentType:
+          effectiveContentType === "application/octet-stream" ||
+          effectiveContentType === "text/plain"
+            ? "image/jpeg"
+            : effectiveContentType,
         upsert: false,
       });
 
@@ -216,7 +357,7 @@ Deno.serve(async (req) => {
         image_path: imagePath,
         image_filename: imageFilename,
         image_size_bytes: imageBuffer.byteLength,
-        content_type: contentType,
+        content_type: effectiveContentType,
         upload_status: "uploaded",
       })
       .select("id")
@@ -264,6 +405,8 @@ Deno.serve(async (req) => {
       message: "Raw image uploaded successfully",
       image_upload_id: imageUpload.id,
       detection_result_id: detectionResult?.id,
+      expected_crc32: expectedCrc32,
+      computed_crc32: computedCrc32,
     };
 
     return new Response(JSON.stringify(response), {
@@ -289,16 +432,10 @@ Deno.serve(async (req) => {
 });
 
 /*
-Example request shape (using query parameters for A7670 compatibility):
+Example request shape (A7670-compatible query metadata + CRC32):
 
-POST /functions/v1/upload-trap-image2?trap_id=TRAP-001&captured_at=2026-03-08T20%3A15%3A00Z&gps_lat=9.771234&gps_lon=124.472134&ldr_value=12&is_fallen=false&battery_voltage=3.91&api_key=YOUR_DEVICE_SECRET
+POST /functions/v1/upload-trap-image2?trap_id=TRAP-001&captured_at=2026-03-08T20%3A15%3A00Z&gps_lat=9.771234&gps_lon=124.472134&ldr_value=12&is_fallen=false&battery_voltage=3.91&api_key=YOUR_DEVICE_SECRET&image_crc32=243F5C18
 Content-Type: image/jpeg
 
 [BINARY JPEG BODY]
-
-curl example:
-
-curl -i --location --request POST 'http://127.0.0.1:54321/functions/v1/upload-trap-image2?trap_id=TRAP-001&captured_at=2026-03-08T20%3A15%3A00Z&gps_lat=9.771234&gps_lon=124.472134&ldr_value=12&is_fallen=false&battery_voltage=3.91&api_key=YOUR_DEVICE_SECRET' \
-  --header 'Content-Type: image/jpeg' \
-  --data-binary '@/path/to/image.jpg'
 */

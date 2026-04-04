@@ -187,8 +187,10 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
   }
 
   // ---- Build URL with query parameters (A7670 doesn't reliably send custom headers) ----
+  const char *trapId =
+      (meta.trapId && strlen(meta.trapId)) ? meta.trapId : DEFAULT_TRAP_ID;
   String urlWithParams = String(SUPABASE_URL);
-  urlWithParams += "?trap_id=" + String(meta.trapId);
+  urlWithParams += "?trap_id=" + String(trapId);
   urlWithParams += "&captured_at=" + String(meta.capturedAt);
   urlWithParams += "&gps_lat=" + String(meta.gpsLat);
   urlWithParams += "&gps_lon=" + String(meta.gpsLon);
@@ -215,8 +217,8 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
 
   // ---- POST the Base64 JPEG body ----
   // TinyGsmHttpsComm (A7670) has no body-size cap.
-  // Internally: AT+HTTPDATA=<size>,10000 → DOWNLOAD → stream.write() → OK
-  //             AT+HTTPACTION=1 → +HTTPACTION: 1,<status>,<len>
+  // Internally: AT+HTTPDATA=<size>,10000 -> DOWNLOAD -> stream.write() -> OK
+  //             AT+HTTPACTION=1 -> +HTTPACTION: 1,<status>,<len>
   // The 10 s HTTPDATA timeout is usually sufficient for small payloads at 115200 baud.
   int httpCode =
       modem.https_post(encodedPhoto.c_str(), (size_t)encodedPhoto.length());
