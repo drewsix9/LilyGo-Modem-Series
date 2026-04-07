@@ -74,7 +74,8 @@ class TinyGsmHttpsComm {
    * @param enableSNI Whether to enable SNI (Server Name Indication). Defaults to true.
    * @return true if the URL and SSL version are set successfully, false otherwise.
    */
-  bool https_set_url(const String& url, ServerSSLVersion ssl_version = TINYGSM_SSL_AUTO, bool enableSNI = true) {
+  bool https_set_url(const String& url, ServerSSLVersion ssl_version = TINYGSM_SSL_AUTO,
+                     bool enableSNI = true) {
     // https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/issues/243
     // Set SSL Version
     thisModem().sendAT("+CSSLCFG=\"sslversion\",0,", ssl_version);
@@ -380,6 +381,83 @@ class TinyGsmHttpsComm {
   }
 
   /**
+   * @brief Begin a streamed HTTP POST body transfer.
+   *
+   * This method prepares the modem to receive an HTTP body in multiple writes.
+   * Call https_post_write() one or more times, then finalize with https_post_end().
+   *
+   * @param total_size Total HTTP body size in bytes.
+   * @return true if modem enters DOWNLOAD state successfully, false otherwise.
+   */
+  bool https_post_begin(size_t total_size) {
+    if (httpDataStreamOpen_) {
+      log_e("HTTPDATA stream is already open");
+      return false;
+    }
+    thisModem().sendAT("+HTTPDATA=", total_size, ",", 20000);
+    if (thisModem().waitResponse(30000UL, "DOWNLOAD") != 1) { return false; }
+    httpDataStreamOpen_   = true;
+    httpDataExpectedSize_ = total_size;
+    httpDataBytesWritten_ = 0;
+    return true;
+  }
+
+  /**
+   * @brief Stream a chunk of HTTP POST body data.
+   *
+   * Data is internally throttled in small UART writes to reduce modem RX overrun.
+   *
+   * @param chunk Pointer to chunk bytes.
+   * @param size Chunk size in bytes.
+   * @return true on successful write, false otherwise.
+   */
+  bool https_post_write(const uint8_t* chunk, size_t size) {
+    if (!httpDataStreamOpen_) {
+      log_e("HTTPDATA stream is not open");
+      return false;
+    }
+    if (!chunk && size) { return false; }
+    if (!https_write_data_throttled(chunk, size, &httpDataBytesWritten_)) {
+      httpDataStreamOpen_ = false;
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * @brief Finalize a streamed HTTP POST body and execute the request.
+   *
+   * @return HTTP status code on success, -1 on failure.
+   */
+  int https_post_end() {
+    if (!httpDataStreamOpen_) {
+      log_e("HTTPDATA stream is not open");
+      return -1;
+    }
+    if (httpDataBytesWritten_ != httpDataExpectedSize_) {
+      log_e("HTTPDATA size mismatch expected:%u written:%u", httpDataExpectedSize_,
+            httpDataBytesWritten_);
+      httpDataStreamOpen_ = false;
+      return -1;
+    }
+    if (thisModem().waitResponse(30000UL) != 1) {
+      httpDataStreamOpen_ = false;
+      return -1;
+    }
+    httpDataStreamOpen_ = false;
+    thisModem().sendAT("+HTTPACTION=", TINYGSM_HTTP_POST);
+    if (thisModem().waitResponse(3000) != 1) { return -1; }
+    if (thisModem().waitResponse(60000UL, "+HTTPACTION:") == 1) {
+      int    action = thisModem().streamGetIntBefore(',');
+      int    status = thisModem().streamGetIntBefore(',');
+      size_t length = thisModem().streamGetLongLongBefore('\r');
+      log_d("Method:%d http code:%d length:%u", action, status, length);
+      return status;
+    }
+    return -1;
+  }
+
+  /**
    * @brief Sends an HTTPS POST request with a String payload.
    *
    * This is a wrapper function that converts a String object to a C-style string
@@ -437,7 +515,7 @@ class TinyGsmHttpsComm {
    * the request payload.
    *
    * SIM7600X NOT SUPPORT HTTP PUT METHOD
-   * 
+   *
    * @param payload A reference to a `String` object containing the request payload data.
    * @return int The return value of the `https_method` function, indicating the result of
    * the request.
@@ -511,6 +589,27 @@ class TinyGsmHttpsComm {
   }
 
  private:
+  bool   httpDataStreamOpen_   = false;
+  size_t httpDataExpectedSize_ = 0;
+  size_t httpDataBytesWritten_ = 0;
+
+  bool https_write_data_throttled(const uint8_t* payload, size_t size,
+                                  size_t* cumulativeWritten = NULL) {
+    if (!payload && size) { return false; }
+    size_t written = 0;
+    while (written < size) {
+      size_t remaining = size - written;
+      size_t toWrite   = remaining > 128 ? 128 : remaining;
+      size_t sent      = thisModem().stream.write(payload + written, toWrite);
+      if (sent != toWrite) { return false; }
+      written += sent;
+      thisModem().stream.flush();
+      if (cumulativeWritten) { *cumulativeWritten += sent; }
+      delay(25);
+    }
+    return true;
+  }
+
   bool https_wait_header_respond() {
     const char* header_respond = "+HTTPHEAD: ";
     switch (platform) {
@@ -534,7 +633,9 @@ class TinyGsmHttpsComm {
     if (payload) {
       thisModem().sendAT("+HTTPDATA=", size, ",", inputTimeout);
       if (thisModem().waitResponse(30000UL, "DOWNLOAD") != 1) { return -1; }
-      thisModem().stream.write(payload, size);
+      if (!https_write_data_throttled(reinterpret_cast<const uint8_t*>(payload), size)) {
+        return -1;
+      }
       if (thisModem().waitResponse(30000UL) != 1) { return -1; }
     }
     thisModem().sendAT("+HTTPACTION=", method);

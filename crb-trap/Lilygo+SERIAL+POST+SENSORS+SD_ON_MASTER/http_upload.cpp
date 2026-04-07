@@ -9,7 +9,6 @@
 #include "http_upload.h"
 #include "utilities.h"
 #include <TinyGsmClient.h>
-#include <base64.h>
 
 #ifndef SUPABASE_URL
 #error "SUPABASE_URL is not defined"
@@ -166,20 +165,6 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
   snprintf(crcHex, sizeof(crcHex), "%08lX", (unsigned long)photoCRC);
   Serial.printf("[HTTP] Photo CRC32: %s\n", crcHex);
 
-  // Base64-encode payload to avoid modem character set remapping of binary bytes.
-  const size_t encodedSize = 4 * ((photoSize + 2) / 3);
-  String encodedPhoto = base64::encode(photoData, photoSize);
-  if (encodedPhoto.length() == 0) {
-    Serial.println("[HTTP] Base64 encoding failed");
-    return -1;
-  }
-  Serial.printf("[HTTP] Base64 size: %u -> %u bytes\n", (unsigned)photoSize,
-                (unsigned)encodedPhoto.length());
-  if (encodedPhoto.length() != encodedSize) {
-    Serial.printf("[HTTP] Warning: expected base64 size %u, got %u\n",
-                  (unsigned)encodedSize, (unsigned)encodedPhoto.length());
-  }
-
   // ---- Initialise HTTPS service (AT+HTTPINIT) ----
   if (!modem.https_begin()) {
     Serial.println("[HTTP] HTTPS init failed");
@@ -208,23 +193,88 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
     return -1;
   }
 
-  // ---- Content type ----
-  if (!modem.https_set_content_type("text/plain")) {
+  // ---- Multipart form-data content type ----
+  static const char *kBoundary = "----ESP32_A7670_Boundary";
+  String contentType = "multipart/form-data; boundary=";
+  contentType += kBoundary;
+  if (!modem.https_set_content_type(contentType.c_str())) {
     Serial.println("[HTTP] Failed to set content type");
+    modem.https_end();
+    return -1;
   }
 
   Serial.println("[HTTP] Metadata sent via query parameters");
 
-  // ---- POST the Base64 JPEG body ----
-  // TinyGsmHttpsComm (A7670) has no body-size cap.
-  // Internally: AT+HTTPDATA=<size>,10000 -> DOWNLOAD -> stream.write() -> OK
-  //             AT+HTTPACTION=1 -> +HTTPACTION: 1,<status>,<len>
-  // The 10 s HTTPDATA timeout is usually sufficient for small payloads at 115200 baud.
-  int httpCode =
-      modem.https_post(encodedPhoto.c_str(), (size_t)encodedPhoto.length());
+  // ---- Build multipart envelope ----
+  String head = "--";
+  head += kBoundary;
+  head += "\r\n";
+  head +=
+      "Content-Disposition: form-data; name=\"file\"; filename=\"photo.jpg\"\r\n";
+  head += "Content-Type: image/jpeg\r\n";
+  head += "Content-Transfer-Encoding: binary\r\n\r\n";
 
-  // Release temporary Base64 buffer as soon as transfer completes.
-  encodedPhoto = "";
+  String tail = "\r\n--";
+  tail += kBoundary;
+  tail += "--\r\n";
+
+  const size_t totalBodySize = (size_t)head.length() + (size_t)photoSize +
+                               (size_t)tail.length();
+  Serial.printf("[HTTP] Multipart total body size: %u bytes\n",
+                (unsigned)totalBodySize);
+  Serial.printf("[HTTP] Multipart parts: head=%u image=%u tail=%u\n",
+                (unsigned)head.length(), (unsigned)photoSize,
+                (unsigned)tail.length());
+
+  // ---- Begin streamed POST body ----
+  if (!modem.https_post_begin(totalBodySize)) {
+    Serial.println("[HTTP] https_post_begin failed");
+    modem.https_end();
+    return -1;
+  }
+
+  size_t writtenBytes = 0;
+
+  if (!modem.https_post_write((const uint8_t *)head.c_str(),
+                              (size_t)head.length())) {
+    Serial.println("[HTTP] Failed to write multipart header");
+    modem.https_end();
+    return -1;
+  }
+  writtenBytes += (size_t)head.length();
+
+  const size_t photoChunkSize = 512;
+  for (size_t offset = 0; offset < photoSize; offset += photoChunkSize) {
+    size_t remaining = (size_t)photoSize - offset;
+    size_t chunkSize = remaining > photoChunkSize ? photoChunkSize : remaining;
+    if (!modem.https_post_write(photoData + offset, chunkSize)) {
+      Serial.printf("[HTTP] Failed at offset %u\n", (unsigned)offset);
+      modem.https_end();
+      return -1;
+    }
+    writtenBytes += chunkSize;
+    yield();
+  }
+
+  if (!modem.https_post_write((const uint8_t *)tail.c_str(),
+                              (size_t)tail.length())) {
+    Serial.println("[HTTP] Failed to write multipart footer");
+    modem.https_end();
+    return -1;
+  }
+  writtenBytes += (size_t)tail.length();
+
+  Serial.printf("[HTTP] Multipart bytes written: %u/%u\n", (unsigned)writtenBytes,
+                (unsigned)totalBodySize);
+
+  if (writtenBytes != totalBodySize) {
+    Serial.printf("[HTTP] Size mismatch before HTTPACTION: wrote=%u expected=%u\n",
+                  (unsigned)writtenBytes, (unsigned)totalBodySize);
+    modem.https_end();
+    return -1;
+  }
+
+  int httpCode = modem.https_post_end();
 
   if (httpCode == 200 || httpCode == 201) {
     Serial.printf("[HTTP] Upload success! HTTP %d\n", httpCode);
