@@ -8,5 +8,6 @@ images/product/jpeg/*
 
 crb-trap/Lilygo+SERIAL+POST+SENSORS+SD_V2/ESP32CAM_Slave/build_out
 crb-trap/Lilygo+SERIAL+POST+SENSORS+SD_ON_MASTER/ESP32CAM_Slave/build_out
+crb-trap/Lilygo+SERIAL+POST+SENSORS+SD_ON_MASTER+FTP/ESP32CAM_Slave/build_out
 nul
 .env

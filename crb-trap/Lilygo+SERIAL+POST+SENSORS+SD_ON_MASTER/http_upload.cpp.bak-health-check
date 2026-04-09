@@ -1,6 +1,6 @@
 /**
  * @file      http_upload.cpp
- * @brief     Modem init plus raw binary POST upload to /echo-test.
+ * @brief     Modem init plus HTTP health-check request implementation.
  * @license   MIT
  * @copyright Copyright (c) 2026
  */
@@ -9,8 +9,8 @@
 #include "utilities.h"
 #include <TinyGsmClient.h>
 
-#ifndef ECHO_TEST_BASE_URL
-#define ECHO_TEST_BASE_URL "https://backend.crbtrap.me/echo-test"
+#ifndef HEALTHCHECK_BASE_URL
+#define HEALTHCHECK_BASE_URL "https://backend.crbtrap.me/health"
 #endif
 
 // ==================== MODULE-LOCAL MODEM ====================
@@ -18,32 +18,16 @@
 static TinyGsm modem(SerialAT);
 static bool modemInitialized = false;
 
-static uint32_t calculateCRC32(const uint8_t *data, uint32_t length) {
-  uint32_t crc = 0xFFFFFFFF;
-  for (uint32_t i = 0; i < length; i++) {
-    crc ^= data[i];
-    for (int j = 0; j < 8; j++) {
-      crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320UL : 0);
-    }
+static String buildHealthUrl() {
+  String url = String(HEALTHCHECK_BASE_URL);
+  if (url.endsWith("/health")) {
+    return url;
   }
-  return crc ^ 0xFFFFFFFF;
-}
-
-static String buildEchoTestUrl(const char *trapId, const char *crcHex) {
-  String url = String(ECHO_TEST_BASE_URL);
-  if (url.endsWith("/echo-test")) {
-    // already complete
-  } else if (url.endsWith("/")) {
-    url += "echo-test";
+  if (url.endsWith("/")) {
+    url += "health";
   } else {
-    url += "/echo-test";
+    url += "/health";
   }
-
-  url += "?trap_id=";
-  url += (trapId && strlen(trapId)) ? trapId : DEFAULT_TRAP_ID;
-  url += "&image_crc32=";
-  url += (crcHex && strlen(crcHex)) ? crcHex : "00000000";
-
   return url;
 }
 
@@ -166,81 +150,37 @@ bool initModem() {
 
 int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
                 const UploadMetadata &meta) {
-  if (!photoData || photoSize == 0) {
-    Serial.println("[HTTP] No photo data to upload");
-    return -1;
-  }
+  (void)photoData;
+  (void)photoSize;
+  (void)meta;
 
   if (!initModem()) {
-    Serial.println("[HTTP] Modem not ready for echo-test upload");
+    Serial.println("[HTTP] Modem not ready for health check");
     return -1;
   }
 
-  uint32_t photoCRC = calculateCRC32(photoData, photoSize);
-  char crcHex[9] = {0};
-  snprintf(crcHex, sizeof(crcHex), "%08lX", (unsigned long)photoCRC);
-
-  const char *trapId =
-      (meta.trapId && strlen(meta.trapId)) ? meta.trapId : DEFAULT_TRAP_ID;
-  const String echoUrl = buildEchoTestUrl(trapId, crcHex);
-
-  Serial.printf("[HTTP] Uploading %u bytes to /echo-test\n", photoSize);
-  Serial.printf("[HTTP] trap_id=%s crc32=%s\n", trapId, crcHex);
-  Serial.printf("[HTTP] URL: %s\n", echoUrl.c_str());
+  const String healthUrl = buildHealthUrl();
+  Serial.printf("[HTTP] Requesting health endpoint: %s\n", healthUrl.c_str());
 
   if (!modem.https_begin()) {
     Serial.println("[HTTP] HTTPS init failed");
     return -1;
   }
 
-  if (!modem.https_set_url(echoUrl)) {
-    Serial.println("[HTTP] Failed to set echo-test URL");
+  if (!modem.https_set_url(healthUrl)) {
+    Serial.println("[HTTP] Failed to set health URL");
     modem.https_end();
     return -1;
   }
 
-  if (!modem.https_set_content_type("application/octet-stream")) {
-    Serial.println("[HTTP] Failed to set content type");
-    modem.https_end();
-    return -1;
-  }
-
-  if (!modem.https_post_begin(photoSize)) {
-    Serial.println("[HTTP] https_post_begin failed");
-    modem.https_end();
-    return -1;
-  }
-
-  size_t writtenBytes = 0;
-  const size_t chunkSize = 512;
-  for (size_t offset = 0; offset < photoSize; offset += chunkSize) {
-    size_t remaining = (size_t)photoSize - offset;
-    size_t thisChunk = remaining > chunkSize ? chunkSize : remaining;
-    if (!modem.https_post_write(photoData + offset, thisChunk)) {
-      Serial.printf("[HTTP] Failed to write body chunk at offset %u\n",
-                    (unsigned)offset);
-      modem.https_end();
-      return -1;
-    }
-    writtenBytes += thisChunk;
-    yield();
-  }
-
-  if (writtenBytes != photoSize) {
-    Serial.printf("[HTTP] Body write mismatch: wrote=%u expected=%u\n",
-                  (unsigned)writtenBytes, (unsigned)photoSize);
-    modem.https_end();
-    return -1;
-  }
-
-  int httpCode = modem.https_post_end();
-  Serial.printf("[HTTP] /echo-test status: %d\n", httpCode);
+  int httpCode = modem.https_get();
+  Serial.printf("[HTTP] /health status: %d\n", httpCode);
 
   String body = modem.https_body();
   if (body.length() > 0) {
-    Serial.printf("[HTTP] /echo-test response: %s\n", body.c_str());
+    Serial.printf("[HTTP] /health response: %s\n", body.c_str());
   } else {
-    Serial.println("[HTTP] /echo-test response body is empty");
+    Serial.println("[HTTP] /health response body is empty");
   }
 
   modem.https_end();

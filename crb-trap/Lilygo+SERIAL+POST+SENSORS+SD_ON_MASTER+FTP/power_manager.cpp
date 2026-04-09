@@ -70,7 +70,7 @@ void enterDeepSleep() {
   Serial.flush();
 
   // Wake on HIGH level from PIR sensor
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIR_SENSOR_PIN, 1); // TODO: Change this if using different PIR sensor with inverted logic
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIR_SENSOR_PIN, 1);
 
   delay(200);
   esp_deep_sleep_start();

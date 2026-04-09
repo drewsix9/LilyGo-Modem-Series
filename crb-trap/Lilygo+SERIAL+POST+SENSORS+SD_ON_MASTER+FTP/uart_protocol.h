@@ -47,7 +47,7 @@
 #define SNAP_CAPTURE_TIMEOUT_MS 15000
 #define SERIAL_CHUNK_TIMEOUT_MS 15000
 #define PHOTO_TIMEOUT_MS 60000
-#define PHOTO_MAX_RETRIES 1
+#define PHOTO_MAX_RETRIES 3
 
 // ==================== PARAMETER RANGES ====================
 #define PHOTO_WIDTH_MIN 320

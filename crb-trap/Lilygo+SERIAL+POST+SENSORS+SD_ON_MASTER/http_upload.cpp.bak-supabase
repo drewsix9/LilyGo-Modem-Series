@@ -1,6 +1,7 @@
 /**
  * @file      http_upload.cpp
- * @brief     Modem init plus raw binary POST upload to /echo-test.
+ * @brief     HTTPS upload implementation — modem init, network registration,
+ *            and binary JPEG POST to Supabase via SIMCOM A7670 AT commands.
  * @license   MIT
  * @copyright Copyright (c) 2026
  */
@@ -9,8 +10,12 @@
 #include "utilities.h"
 #include <TinyGsmClient.h>
 
-#ifndef ECHO_TEST_BASE_URL
-#define ECHO_TEST_BASE_URL "https://backend.crbtrap.me/echo-test"
+#ifndef SUPABASE_URL
+#error "SUPABASE_URL is not defined"
+#endif
+
+#ifndef SUPABASE_API_KEY
+#error "SUPABASE_API_KEY is not defined"
 #endif
 
 // ==================== MODULE-LOCAL MODEM ====================
@@ -27,24 +32,6 @@ static uint32_t calculateCRC32(const uint8_t *data, uint32_t length) {
     }
   }
   return crc ^ 0xFFFFFFFF;
-}
-
-static String buildEchoTestUrl(const char *trapId, const char *crcHex) {
-  String url = String(ECHO_TEST_BASE_URL);
-  if (url.endsWith("/echo-test")) {
-    // already complete
-  } else if (url.endsWith("/")) {
-    url += "echo-test";
-  } else {
-    url += "/echo-test";
-  }
-
-  url += "?trap_id=";
-  url += (trapId && strlen(trapId)) ? trapId : DEFAULT_TRAP_ID;
-  url += "&image_crc32=";
-  url += (crcHex && strlen(crcHex)) ? crcHex : "00000000";
-
-  return url;
 }
 
 // ==================== MODEM INITIALISATION ====================
@@ -171,78 +158,138 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
     return -1;
   }
 
-  if (!initModem()) {
-    Serial.println("[HTTP] Modem not ready for echo-test upload");
-    return -1;
-  }
+  Serial.printf("[HTTP] Uploading %u bytes to Supabase...\n", photoSize);
 
   uint32_t photoCRC = calculateCRC32(photoData, photoSize);
   char crcHex[9] = {0};
   snprintf(crcHex, sizeof(crcHex), "%08lX", (unsigned long)photoCRC);
+  Serial.printf("[HTTP] Photo CRC32: %s\n", crcHex);
 
-  const char *trapId =
-      (meta.trapId && strlen(meta.trapId)) ? meta.trapId : DEFAULT_TRAP_ID;
-  const String echoUrl = buildEchoTestUrl(trapId, crcHex);
-
-  Serial.printf("[HTTP] Uploading %u bytes to /echo-test\n", photoSize);
-  Serial.printf("[HTTP] trap_id=%s crc32=%s\n", trapId, crcHex);
-  Serial.printf("[HTTP] URL: %s\n", echoUrl.c_str());
-
+  // ---- Initialise HTTPS service (AT+HTTPINIT) ----
   if (!modem.https_begin()) {
     Serial.println("[HTTP] HTTPS init failed");
     return -1;
   }
 
-  if (!modem.https_set_url(echoUrl)) {
-    Serial.println("[HTTP] Failed to set echo-test URL");
+  // ---- Build URL with query parameters (A7670 doesn't reliably send custom headers) ----
+  const char *trapId =
+      (meta.trapId && strlen(meta.trapId)) ? meta.trapId : DEFAULT_TRAP_ID;
+  String urlWithParams = String(SUPABASE_URL);
+  urlWithParams += "?trap_id=" + String(trapId);
+  urlWithParams += "&captured_at=" + String(meta.capturedAt);
+  urlWithParams += "&gps_lat=" + String(meta.gpsLat);
+  urlWithParams += "&gps_lon=" + String(meta.gpsLon);
+  urlWithParams += "&ldr_value=" + String(meta.ldrValue);
+  urlWithParams += "&is_fallen=" + String(meta.isFallen);
+  urlWithParams += "&battery_voltage=" + String(meta.batteryVoltage);
+  urlWithParams += "&api_key=" + String(SUPABASE_API_KEY);
+  urlWithParams += "&image_crc32=" + String(crcHex);
+
+  // ---- Set endpoint URL with parameters ----
+  Serial.printf("[HTTP] Setting URL: %s\n", urlWithParams.c_str());
+  if (!modem.https_set_url(urlWithParams)) {
+    Serial.println("[HTTP] Failed to set URL");
     modem.https_end();
     return -1;
   }
 
-  if (!modem.https_set_content_type("application/octet-stream")) {
+  // ---- Multipart form-data content type ----
+  static const char *kBoundary = "----ESP32_A7670_Boundary";
+  String contentType = "multipart/form-data; boundary=";
+  contentType += kBoundary;
+  if (!modem.https_set_content_type(contentType.c_str())) {
     Serial.println("[HTTP] Failed to set content type");
     modem.https_end();
     return -1;
   }
 
-  if (!modem.https_post_begin(photoSize)) {
+  Serial.println("[HTTP] Metadata sent via query parameters");
+
+  // ---- Build multipart envelope ----
+  String head = "--";
+  head += kBoundary;
+  head += "\r\n";
+  head +=
+      "Content-Disposition: form-data; name=\"file\"; filename=\"photo.jpg\"\r\n";
+  head += "Content-Type: image/jpeg\r\n";
+  head += "Content-Transfer-Encoding: binary\r\n\r\n";
+
+  String tail = "\r\n--";
+  tail += kBoundary;
+  tail += "--\r\n";
+
+  const size_t totalBodySize = (size_t)head.length() + (size_t)photoSize +
+                               (size_t)tail.length();
+  Serial.printf("[HTTP] Multipart total body size: %u bytes\n",
+                (unsigned)totalBodySize);
+  Serial.printf("[HTTP] Multipart parts: head=%u image=%u tail=%u\n",
+                (unsigned)head.length(), (unsigned)photoSize,
+                (unsigned)tail.length());
+
+  // ---- Begin streamed POST body ----
+  if (!modem.https_post_begin(totalBodySize)) {
     Serial.println("[HTTP] https_post_begin failed");
     modem.https_end();
     return -1;
   }
 
   size_t writtenBytes = 0;
-  const size_t chunkSize = 512;
-  for (size_t offset = 0; offset < photoSize; offset += chunkSize) {
+
+  if (!modem.https_post_write((const uint8_t *)head.c_str(),
+                              (size_t)head.length())) {
+    Serial.println("[HTTP] Failed to write multipart header");
+    modem.https_end();
+    return -1;
+  }
+  writtenBytes += (size_t)head.length();
+
+  const size_t photoChunkSize = 512;
+  for (size_t offset = 0; offset < photoSize; offset += photoChunkSize) {
     size_t remaining = (size_t)photoSize - offset;
-    size_t thisChunk = remaining > chunkSize ? chunkSize : remaining;
-    if (!modem.https_post_write(photoData + offset, thisChunk)) {
-      Serial.printf("[HTTP] Failed to write body chunk at offset %u\n",
-                    (unsigned)offset);
+    size_t chunkSize = remaining > photoChunkSize ? photoChunkSize : remaining;
+    if (!modem.https_post_write(photoData + offset, chunkSize)) {
+      Serial.printf("[HTTP] Failed at offset %u\n", (unsigned)offset);
       modem.https_end();
       return -1;
     }
-    writtenBytes += thisChunk;
+    writtenBytes += chunkSize;
     yield();
   }
 
-  if (writtenBytes != photoSize) {
-    Serial.printf("[HTTP] Body write mismatch: wrote=%u expected=%u\n",
-                  (unsigned)writtenBytes, (unsigned)photoSize);
+  if (!modem.https_post_write((const uint8_t *)tail.c_str(),
+                              (size_t)tail.length())) {
+    Serial.println("[HTTP] Failed to write multipart footer");
+    modem.https_end();
+    return -1;
+  }
+  writtenBytes += (size_t)tail.length();
+
+  Serial.printf("[HTTP] Multipart bytes written: %u/%u\n", (unsigned)writtenBytes,
+                (unsigned)totalBodySize);
+
+  if (writtenBytes != totalBodySize) {
+    Serial.printf("[HTTP] Size mismatch before HTTPACTION: wrote=%u expected=%u\n",
+                  (unsigned)writtenBytes, (unsigned)totalBodySize);
     modem.https_end();
     return -1;
   }
 
   int httpCode = modem.https_post_end();
-  Serial.printf("[HTTP] /echo-test status: %d\n", httpCode);
 
-  String body = modem.https_body();
-  if (body.length() > 0) {
-    Serial.printf("[HTTP] /echo-test response: %s\n", body.c_str());
+  if (httpCode == 200 || httpCode == 201) {
+    Serial.printf("[HTTP] Upload success! HTTP %d\n", httpCode);
   } else {
-    Serial.println("[HTTP] /echo-test response body is empty");
+    Serial.printf("[HTTP] Upload failed! HTTP %d\n", httpCode);
   }
 
+  // ---- Log the response body ----
+  String body = modem.https_body();
+  if (body.length() > 0) {
+    Serial.printf("[HTTP] Response: %s\n", body.c_str());
+  }
+
+  // ---- Terminate HTTPS (AT+HTTPTERM) ----
   modem.https_end();
+
   return httpCode;
 }
