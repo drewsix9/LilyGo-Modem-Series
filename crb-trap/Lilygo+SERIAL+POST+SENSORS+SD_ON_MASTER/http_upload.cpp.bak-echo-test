@@ -9,14 +9,9 @@
 #include "http_upload.h"
 #include "utilities.h"
 #include <TinyGsmClient.h>
-#include <ctype.h>
 
-#ifndef UPLOAD_TRAP_IMAGE_BASE_URL
-#ifdef ECHO_TEST_BASE_URL
-#define UPLOAD_TRAP_IMAGE_BASE_URL ECHO_TEST_BASE_URL
-#else
-#define UPLOAD_TRAP_IMAGE_BASE_URL "https://backend.crbtrap.me/upload-trap-image"
-#endif
+#ifndef ECHO_TEST_BASE_URL
+#define ECHO_TEST_BASE_URL "https://backend.crbtrap.me/echo-test"
 #endif
 
 // ==================== MODULE-LOCAL MODEM ====================
@@ -51,84 +46,21 @@ static uint32_t calculateCRC32(const uint8_t *data, uint32_t length) {
   return crc ^ 0xFFFFFFFF;
 }
 
-static String urlEncode(const char *value) {
-  if (!value) {
-    return String("");
-  }
+static String buildEchoTestUrl(const char *trapId, const char *crcHex) {
+  String url = String(ECHO_TEST_BASE_URL);
 
-  String encoded;
-  const char *hex = "0123456789ABCDEF";
-
-  for (size_t i = 0; value[i] != '\0'; ++i) {
-    const uint8_t c = (uint8_t)value[i];
-    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-      encoded += (char)c;
-    } else {
-      encoded += '%';
-      encoded += hex[(c >> 4) & 0x0F];
-      encoded += hex[c & 0x0F];
-    }
-  }
-
-  return encoded;
-}
-
-static String buildUploadFilename(const char *trapId, const char *crcHex) {
-  String filename;
-  filename += (trapId && strlen(trapId)) ? trapId : DEFAULT_TRAP_ID;
-  filename += "-";
-  filename += (crcHex && strlen(crcHex)) ? crcHex : "00000000";
-  filename += ".jpg";
-  return filename;
-}
-
-static String buildUploadTrapImageUrl(const UploadMetadata &meta,
-                                      const char *crcHex,
-                                      const String &filename) {
-  const char *trapId =
-      (meta.trapId && strlen(meta.trapId)) ? meta.trapId : DEFAULT_TRAP_ID;
-  const char *capturedAt = (meta.capturedAt && strlen(meta.capturedAt))
-                               ? meta.capturedAt
-                               : DEFAULT_CAPTURED_AT;
-  const char *gpsLat =
-      (meta.gpsLat && strlen(meta.gpsLat)) ? meta.gpsLat : DEFAULT_GPS_LAT;
-  const char *gpsLon =
-      (meta.gpsLon && strlen(meta.gpsLon)) ? meta.gpsLon : DEFAULT_GPS_LON;
-  const char *isFallen = (meta.isFallen && strlen(meta.isFallen))
-                             ? meta.isFallen
-                             : DEFAULT_IS_FALLEN;
-  const char *batteryVoltage =
-      (meta.batteryVoltage && strlen(meta.batteryVoltage))
-          ? meta.batteryVoltage
-          : DEFAULT_BATTERY_VOLTAGE;
-
-  String url = String(UPLOAD_TRAP_IMAGE_BASE_URL);
-  if (url.endsWith("/upload-trap-image")) {
+  if (url.endsWith("/echo-test")) {
     // already complete
   } else if (url.endsWith("/")) {
-    url += "upload-trap-image";
+    url += "echo-test";
   } else {
-    url += "/upload-trap-image";
+    url += "/echo-test";
   }
 
   url += "?trap_id=";
-  url += urlEncode(trapId);
-  url += "&captured_at=";
-  url += urlEncode(capturedAt);
+  url += (trapId && strlen(trapId)) ? trapId : DEFAULT_TRAP_ID;
   url += "&image_crc32=";
-  url += urlEncode((crcHex && strlen(crcHex)) ? crcHex : "00000000");
-  url += "&filename=";
-  url += urlEncode(filename.c_str());
-  url += "&gps_lat=";
-  url += urlEncode(gpsLat);
-  url += "&gps_lon=";
-  url += urlEncode(gpsLon);
-  url += "&ldr_value=";
-  url += String((unsigned)meta.ldrValue);
-  url += "&is_fallen=";
-  url += urlEncode(isFallen);
-  url += "&battery_voltage=";
-  url += urlEncode(batteryVoltage);
+  url += (crcHex && strlen(crcHex)) ? crcHex : "00000000";
 
   return url;
 }
@@ -399,7 +331,7 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
   }
 
   if (!initModem()) {
-    Serial.println("[HTTP] Modem not ready for /upload-trap-image");
+    Serial.println("[HTTP] Modem not ready for echo-test upload");
     return -1;
   }
 
@@ -409,13 +341,11 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
 
   const char *trapId =
       (meta.trapId && strlen(meta.trapId)) ? meta.trapId : DEFAULT_TRAP_ID;
-  const String filename = buildUploadFilename(trapId, crcHex);
-  const String uploadUrl = buildUploadTrapImageUrl(meta, crcHex, filename);
+  const String echoUrl = buildEchoTestUrl(trapId, crcHex);
 
-  Serial.printf("[HTTP] Uploading %u bytes to /upload-trap-image\n", photoSize);
+  Serial.printf("[HTTP] Uploading %u bytes to /echo-test\n", photoSize);
   Serial.printf("[HTTP] trap_id=%s crc32=%s\n", trapId, crcHex);
-  Serial.printf("[HTTP] filename=%s\n", filename.c_str());
-  Serial.printf("[HTTP] URL: %s\n", uploadUrl.c_str());
+  Serial.printf("[HTTP] URL: %s\n", echoUrl.c_str());
 
   // Even when the modem/data session is kept warm, we still start and end
   // the HTTPS transaction per request. This is much safer with SIMCOM HTTP(S)
@@ -427,8 +357,8 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
     return -1;
   }
 
-  if (!modem.https_set_url(uploadUrl)) {
-    Serial.println("[HTTP] Failed to set /upload-trap-image URL");
+  if (!modem.https_set_url(echoUrl)) {
+    Serial.println("[HTTP] Failed to set echo-test URL");
     modem.https_end();
     return -1;
   }
@@ -471,13 +401,13 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
   }
 
   int httpCode = modem.https_post_end();
-  Serial.printf("[HTTP] /upload-trap-image status: %d\n", httpCode);
+  Serial.printf("[HTTP] /echo-test status: %d\n", httpCode);
 
   String body = modem.https_body();
   if (body.length() > 0) {
-    Serial.printf("[HTTP] /upload-trap-image response: %s\n", body.c_str());
+    Serial.printf("[HTTP] /echo-test response: %s\n", body.c_str());
   } else {
-    Serial.println("[HTTP] /upload-trap-image response body is empty");
+    Serial.println("[HTTP] /echo-test response body is empty");
   }
 
   modem.https_end();

@@ -10,7 +10,7 @@
  **************************************************************/
 
 // Select your modem:
-#define TINY_GSM_MODEM_SIM800
+// #define TINY_GSM_MODEM_SIM800
 // #define TINY_GSM_MODEM_SIM808
 // #define TINY_GSM_MODEM_SIM868
 // #define TINY_GSM_MODEM_SIM900
@@ -24,7 +24,7 @@
 // #define TINY_GSM_MODEM_M95
 // #define TINY_GSM_MODEM_BG96
 // #define TINY_GSM_MODEM_A6
-// #define TINY_GSM_MODEM_A7
+#define TINY_GSM_MODEM_A7
 // #define TINY_GSM_MODEM_M590
 // #define TINY_GSM_MODEM_MC60
 // #define TINY_GSM_MODEM_MC60E
@@ -122,7 +122,7 @@ const char resource[] = "/TinyGSM/logo.txt";
 StreamDebugger debugger(SerialAT, SerialMon);
 TinyGsm        modem(debugger);
 #else
-TinyGsm        modem(SerialAT);
+TinyGsm modem(SerialAT);
 #endif
 
 void setup() {
@@ -239,8 +239,7 @@ void loop() {
 
     // Wait for data to arrive
     uint32_t start = millis();
-    while (client.connected() && !client.available() &&
-           millis() - start < 30000L) {
+    while (client.connected() && !client.available() && millis() - start < 30000L) {
       delay(100);
     };
 
@@ -303,8 +302,7 @@ void loop() {
   }
 #endif
 
-#if TINY_GSM_TEST_CALL && defined TINY_GSM_MODEM_HAS_CALLING && \
-    defined                       CALL_TARGET
+#if TINY_GSM_TEST_CALL && defined TINY_GSM_MODEM_HAS_CALLING && defined CALL_TARGET
   DBG("Calling:", CALL_TARGET);
 
   // This is NOT supported on M590
@@ -355,8 +353,8 @@ void loop() {
   int   sec      = 0;
   for (int8_t i = 15; i; i--) {
     DBG("Requesting current GSM location");
-    if (modem.getGsmLocation(&lat, &lon, &accuracy, &year, &month, &day, &hour,
-                             &min, &sec)) {
+    if (modem.getGsmLocation(&lat, &lon, &accuracy, &year, &month, &day, &hour, &min,
+                             &sec)) {
       DBG("Latitude:", String(lat, 8), "\tLongitude:", String(lon, 8));
       DBG("Accuracy:", accuracy);
       DBG("Year:", year, "\tMonth:", month, "\tDay:", day);
@@ -391,8 +389,8 @@ void loop() {
   int   sec2      = 0;
   for (int8_t i = 15; i; i--) {
     DBG("Requesting current GPS/GNSS/GLONASS location");
-    if (modem.getGPS(&lat2, &lon2, &speed2, &alt2, &vsat2, &usat2, &accuracy2,
-                     &year2, &month2, &day2, &hour2, &min2, &sec2)) {
+    if (modem.getGPS(&lat2, &lon2, &speed2, &alt2, &vsat2, &usat2, &accuracy2, &year2,
+                     &month2, &day2, &hour2, &min2, &sec2)) {
       DBG("Latitude:", String(lat2, 8), "\tLongitude:", String(lon2, 8));
       DBG("Speed:", speed2, "\tAltitude:", alt2);
       DBG("Visible Satellites:", vsat2, "\tUsed Satellites:", usat2);
@@ -427,8 +425,7 @@ void loop() {
   float timezone = 0;
   for (int8_t i = 5; i; i--) {
     DBG("Requesting current network time");
-    if (modem.getNetworkTime(&year3, &month3, &day3, &hour3, &min3, &sec3,
-                             &timezone)) {
+    if (modem.getNetworkTime(&year3, &month3, &day3, &hour3, &min3, &sec3, &timezone)) {
       DBG("Year:", year3, "\tMonth:", month3, "\tDay:", day3);
       DBG("Hour:", hour3, "\tMinute:", min3, "\tSecond:", sec3);
       DBG("Timezone:", timezone);

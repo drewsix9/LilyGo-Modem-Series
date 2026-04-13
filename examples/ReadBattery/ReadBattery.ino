@@ -55,8 +55,8 @@ TinyGsm modem(SerialAT);
 #endif
 
 // WiFi network name and password:
-const char *networkName = "Converge_2.4GHz_gnB5";
-const char *networkPswd = "Gamale@2025";
+const char *networkName = "LAPTOP-UG4NVH60 4120";
+const char *networkPswd = "helloworld";
 
 // IP address to send UDP data to:
 //  either use the ip address of the server or
