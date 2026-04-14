@@ -24,6 +24,8 @@
 #include "http_upload.h"
 #include "power_manager.h"
 #include "sensor.h"
+#include "soc/rtc_cntl_reg.h"
+#include "soc/soc.h"
 #include "uart_master.h"
 #include "uart_protocol.h"
 #include "utilities.h"
@@ -42,6 +44,9 @@
 
 // ==================== SETUP ====================
 void setup() {
+
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+
   Serial.begin(115200);
   delay(100);
 

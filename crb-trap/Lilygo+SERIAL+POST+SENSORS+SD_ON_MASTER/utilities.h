@@ -114,6 +114,10 @@
 
 #define LED_PIN (12)
 
+// Battery and solar voltage ADC pins
+#define BOARD_BAT_ADC_PIN (35)
+#define BOARD_SOLAR_ADC_PIN (36)
+
 #define MODEM_POWERON_PULSE_WIDTH_MS (1000)
 #define MODEM_RESET_LEVEL HIGH
 

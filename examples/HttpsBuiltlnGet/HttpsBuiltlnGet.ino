@@ -46,7 +46,8 @@ const char *request_url[] = {
     "https://ipapi.co/timezone", // Access may be blocked by a firewall
     "http://ip-api.com/json/23.158.104.183",
     "https://ikfu.azurewebsites.net/api/GetUtcTime", // https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/issues/243
-    "http://6.ipw.cn"                                // ipv6 only
+    "http://6.ipw.cn",                               // ipv6 only
+    "https://backend.crbtrap.me/health"              // repeat first URL to test connection reuse
 };
 
 // ISSUES ： https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/issues/243

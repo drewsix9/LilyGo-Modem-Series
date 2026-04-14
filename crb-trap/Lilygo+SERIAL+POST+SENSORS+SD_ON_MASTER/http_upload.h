@@ -21,22 +21,24 @@
 #define DEFAULT_GPS_LAT "9.77"
 #define DEFAULT_GPS_LON "124.47"
 #define DEFAULT_IS_FALLEN "false"
-#define DEFAULT_BATTERY_VOLTAGE "3.91"
+#define DEFAULT_BATTERY_VOLTAGE "3.91" // Fallback: actual reading from voltage_reader preferred
+#define DEFAULT_SOLAR_VOLTAGE ""       // Empty string = omit from query params
 #define DEFAULT_CAPTURED_AT "2026-03-08T00:00:00Z"
 
 // ==================== UPLOAD METADATA ====================
 /**
- * @brief Capture metadata sent as HTTP headers alongside the JPEG body.
- *        Fields map 1:1 to the Edge Function's expected x-* headers.
+ * @brief Capture metadata sent as query parameters with the HTTPS POST.
+ *        All string fields are URL-encoded and passed as query params.
  */
 struct UploadMetadata {
-  const char *trapId;         // x-trap-id
-  const char *capturedAt;     // x-captured-at  (ISO 8601)
-  const char *gpsLat;         // x-gps-lat
-  const char *gpsLon;         // x-gps-lon
-  uint16_t ldrValue;          // x-ldr-value
-  const char *isFallen;       // x-is-fallen    ("true" / "false")
-  const char *batteryVoltage; // x-battery-voltage
+  const char *trapId;         // trap_id query param
+  const char *capturedAt;     // captured_at query param (ISO 8601)
+  const char *gpsLat;         // gps_lat query param
+  const char *gpsLon;         // gps_lon query param
+  uint16_t ldrValue;          // ldr_value query param
+  const char *isFallen;       // is_fallen query param ("true" / "false")
+  const char *batteryVoltage; // battery_voltage query param (mV as integer string)
+  const char *solarVoltage;   // solar_voltage query param (mV as integer string, omitted if empty)
 };
 
 // ==================== API ====================

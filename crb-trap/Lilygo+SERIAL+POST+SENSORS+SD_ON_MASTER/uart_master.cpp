@@ -10,6 +10,7 @@
 #include "ESP32CAM_Slave/sdcard.h"
 #include "http_upload.h"
 #include "uart_protocol.h"
+#include "voltage_reader.h"
 #include <Arduino.h>
 #include <SerialTransfer.h>
 #include <WiFi.h>
@@ -34,6 +35,10 @@ volatile uint32_t lastPacketTime = 0;
 
 uint16_t capturedLuxValue = 0;
 bool capturedIsFallen = false;
+
+// Module-level storage for voltage readings (preserved until upload completes)
+static char capturedBatteryVoltageStr[16] = {0};
+static char capturedSolarVoltageStr[16] = {0};
 
 static HardwareSerial camUart(2); // Serial2 on GPIO18/19
 static SerialTransfer camTransfer;
@@ -410,6 +415,54 @@ bool receivePhoto() {
     Serial.println("[SD] Master SD not available, skipping archive");
   }
 
+  // ==================== VOLTAGE READING ====================
+  // Read battery and solar voltages for this capture.
+  // Initialize voltage reader if not already done.
+  static bool voltageReaderInitialized = false;
+  if (!voltageReaderInitialized) {
+    VoltageReaderConfig voltCfg;
+    voltCfg.avg_samples = 20;
+    voltCfg.sample_delay_ms = 30;
+    voltCfg.apply_divider_correction = true;
+    
+    if (initVoltageReader(voltCfg)) {
+      voltageReaderInitialized = true;
+      Serial.println("[VOLT] Voltage reader initialized");
+    } else {
+      Serial.println("[VOLT] WARNING: Voltage reader init failed");
+      voltageReaderInitialized = false;
+    }
+  }
+
+  // Read voltages and store in module-level buffers.
+  memset(capturedBatteryVoltageStr, 0, sizeof(capturedBatteryVoltageStr));
+  memset(capturedSolarVoltageStr, 0, sizeof(capturedSolarVoltageStr));
+
+  if (voltageReaderInitialized) {
+    VoltageReading voltReading = readBothVoltagesMv();
+    
+    if (voltReading.battery_valid) {
+      snprintf(capturedBatteryVoltageStr, sizeof(capturedBatteryVoltageStr), "%lu", voltReading.battery_mv);
+      Serial.printf("[VOLT] Battery: %s mV\n", capturedBatteryVoltageStr);
+    } else {
+      snprintf(capturedBatteryVoltageStr, sizeof(capturedBatteryVoltageStr), "%s", DEFAULT_BATTERY_VOLTAGE);
+      Serial.println("[VOLT] Battery read failed, using default");
+    }
+
+    if (voltReading.solar_valid && isSolarAvailable()) {
+      snprintf(capturedSolarVoltageStr, sizeof(capturedSolarVoltageStr), "%lu", voltReading.solar_mv);
+      Serial.printf("[VOLT] Solar: %s mV\n", capturedSolarVoltageStr);
+    } else {
+      // Leave solarVoltageStr empty to omit from URL when unavailable
+      Serial.println("[VOLT] Solar unavailable, will omit from metadata");
+    }
+  } else {
+    // Voltage reader failed; use defaults
+    snprintf(capturedBatteryVoltageStr, sizeof(capturedBatteryVoltageStr), "%s", DEFAULT_BATTERY_VOLTAGE);
+    // Leave solarVoltageStr empty
+  }
+
+  // ==================== UPLOAD METADATA ====================
   // Upload photo to Supabase via A7670 modem.
   UploadMetadata meta;
   meta.trapId = DEFAULT_TRAP_ID;
@@ -418,7 +471,8 @@ bool receivePhoto() {
   meta.gpsLon = DEFAULT_GPS_LON;
   meta.ldrValue = capturedLuxValue;
   meta.isFallen = capturedIsFallen ? "true" : "false";
-  meta.batteryVoltage = DEFAULT_BATTERY_VOLTAGE;
+  meta.batteryVoltage = capturedBatteryVoltageStr;
+  meta.solarVoltage = capturedSolarVoltageStr;
 
   if (initModem()) {
     int httpCode = uploadPhoto(photoBuffer, photoSize, meta);

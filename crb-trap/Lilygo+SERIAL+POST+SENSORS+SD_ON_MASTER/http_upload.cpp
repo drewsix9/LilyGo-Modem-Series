@@ -101,6 +101,10 @@ static String buildUploadTrapImageUrl(const UploadMetadata &meta,
       (meta.batteryVoltage && strlen(meta.batteryVoltage))
           ? meta.batteryVoltage
           : DEFAULT_BATTERY_VOLTAGE;
+  const char *solarVoltage =
+      (meta.solarVoltage && strlen(meta.solarVoltage))
+          ? meta.solarVoltage
+          : DEFAULT_SOLAR_VOLTAGE;
 
   String url = String(UPLOAD_TRAP_IMAGE_BASE_URL);
   if (url.endsWith("/upload-trap-image")) {
@@ -129,6 +133,12 @@ static String buildUploadTrapImageUrl(const UploadMetadata &meta,
   url += urlEncode(isFallen);
   url += "&battery_voltage=";
   url += urlEncode(batteryVoltage);
+
+  // Append solar voltage only if provided (non-empty)
+  if (solarVoltage && strlen(solarVoltage) > 0) {
+    url += "&solar_voltage=";
+    url += urlEncode(solarVoltage);
+  }
 
   return url;
 }
