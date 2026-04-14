@@ -343,9 +343,22 @@ static bool tryWarmModemRecovery() {
 }
 
 static bool coldBootModemAndAttach() {
+  // Reduce CPU frequency to minimize current draw during modem power-up
+  // This leaves more current available for the modem rails on battery
+  Serial.println("[MODEM] Reducing CPU freq to 80 MHz for power-up...");
+  setCpuFrequencyMhz(80);
+
   beginModemSerial();
   configureModemPinsForAwakeState();
   hardResetAndPowerOnModem();
+
+  // Critical: Wait for voltage rails to stabilize after the power spike
+  Serial.println("[MODEM] Settling power rails...");
+  delay(500);
+
+  // Restore full CPU speed before AT communication
+  Serial.println("[MODEM] Restoring CPU freq to 240 MHz...");
+  setCpuFrequencyMhz(240);
 
   if (!waitForATAfterBoot()) {
     return false;
