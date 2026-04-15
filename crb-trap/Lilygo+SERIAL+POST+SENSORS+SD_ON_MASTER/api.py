@@ -1,10 +1,21 @@
 from flask import Flask, request, jsonify
 import zlib
 import os
+import logging
+import time
 from datetime import datetime
 from supabase import create_client, Client
 
+# YOLOv8 & Image Processing
+import cv2
+import numpy as np
+from ultralytics import YOLO
+
 app = Flask(__name__)
+
+# --- LOGGING CONFIGURATION ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
 SAVE_DIR = "/mnt/ramdisk/debug_images"
@@ -14,6 +25,111 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 SUPABASE_URL = "https://estunmbmwzxactvrqjgo.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVzdHVubWJtd3p4YWN0dnJxamdvIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MjgwODAxMiwiZXhwIjoyMDg4Mzg0MDEyfQ.GIQZMPlHHozJV3JqeIhJLfSM_OWjPao5B8J-zjEiLi8"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# --- YOLOV8 MODEL INITIALIZATION (NCNN FORMAT) ---
+# Load the custom trained model in NCNN format for Raspberry Pi optimization
+# Export your model to NCNN: yolo export model=path/to/best.pt format=ncnn imgsz=640
+MODEL_PATH = os.getenv(
+    "YOLO_MODEL_PATH", "/path/to/best-ncnn_model/best.ncnn.param")
+try:
+    model = YOLO(MODEL_PATH)
+    logger.info(f"✓ YOLOv8 NCNN model loaded from: {MODEL_PATH}")
+except Exception as e:
+    logger.error(f"✗ Failed to load YOLOv8 model: {e}")
+    model = None
+
+
+# --- INFERENCE HELPER FUNCTION WITH ERROR HANDLING ---
+def process_inference(image_bytes):
+    """
+    Process image inference using YOLOv8 NCNN model.
+
+    Returns:
+        tuple: (counts_dict, annotated_bytes, inference_time_ms, error_msg)
+               - counts_dict: {"male": int, "female": int, "unknown": int}
+               - annotated_bytes: JPEG bytes of annotated image (or None if error)
+               - inference_time_ms: Inference duration in milliseconds
+               - error_msg: None if successful, error string if failed
+    """
+    try:
+        if model is None:
+            return None, None, 0, "Model not loaded"
+
+        # Step 1: Decode image bytes to numpy array
+        try:
+            nparr = np.frombuffer(image_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+            if img is None:
+                raise ValueError(
+                    "Failed to decode image - invalid or corrupted format")
+            logger.info(f"✓ Image decoded: {img.shape}")
+        except Exception as e:
+            logger.error(f"✗ Image decode error: {e}")
+            return None, None, 0, f"Image decode failed: {str(e)}"
+
+        # Step 2: Run inference
+        try:
+            inference_start = time.time()
+            results = model(img, conf=0.5, verbose=False)[0]
+            inference_time_ms = int((time.time() - inference_start) * 1000)
+            logger.info(f"✓ Inference complete: {inference_time_ms}ms")
+        except Exception as e:
+            logger.error(f"✗ Inference error: {e}")
+            return None, None, 0, f"Inference failed: {str(e)}"
+
+        # Step 3: Count detections by class
+        try:
+            counts = {"male": 0, "female": 0, "unknown": 0}
+
+            # results.names maps class index to label (e.g., {0: 'male', 1: 'female', 2: 'unknown'})
+            if results.boxes is not None and len(results.boxes) > 0:
+                for box in results.boxes:
+                    try:
+                        cls_id = int(box.cls[0])
+                        confidence = float(box.conf[0])
+                        label = results.names[cls_id].lower(
+                        ) if cls_id in results.names else "unknown"
+
+                        # Only count if in our expected classes
+                        if label in counts:
+                            counts[label] += 1
+                            logger.debug(
+                                f"  Detected: {label} (conf: {confidence:.2f})")
+                    except Exception as box_err:
+                        logger.warning(f"  Warning parsing box: {box_err}")
+                        continue
+
+            total_beetles = sum(counts.values())
+            logger.info(
+                f"✓ Detection counts: Male={counts['male']}, Female={counts['female']}, Unknown={counts['unknown']}, Total={total_beetles}")
+        except Exception as e:
+            logger.error(f"✗ Box parsing error: {e}")
+            return None, None, inference_time_ms, f"Failed to parse detections: {str(e)}"
+
+        # Step 4: Annotate image if beetles found
+        try:
+            annotated_img = results.plot()
+
+            # Encode annotated image back to bytes
+            _, buffer = cv2.imencode('.jpg', annotated_img, [
+                                     cv2.IMWRITE_JPEG_QUALITY, 90])
+            if buffer is None:
+                raise ValueError("Failed to encode annotated image")
+
+            annotated_bytes = buffer.tobytes()
+            logger.info(
+                f"✓ Image annotated and encoded: {len(annotated_bytes)} bytes")
+        except Exception as e:
+            logger.error(f"✗ Image annotation error: {e}")
+            return counts, None, inference_time_ms, f"Annotation failed: {str(e)}"
+
+        # Successful inference
+        return counts, annotated_bytes, inference_time_ms, None
+
+    except Exception as e:
+        logger.error(f"✗ Unexpected error in process_inference: {e}")
+        return None, None, 0, f"Unexpected error: {str(e)}"
 
 
 @app.route('/health', methods=['GET'])
@@ -71,8 +187,7 @@ def upload_trap_image():
     try:
         # --- 1. METADATA PARSING ---
         trap_id = request.args.get('trap_id')
-        captured_at = request.args.get(
-            'captured_at') or datetime.utcnow().isoformat()
+        captured_at = datetime.utcnow().isoformat()
         expected_crc = request.args.get('image_crc32')
         image_filename = request.args.get('filename')
 
@@ -101,88 +216,142 @@ def upload_trap_image():
         expected_crc_hex = expected_crc.upper().replace("0X", "")
 
         if computed_crc_hex != expected_crc_hex:
-            print(
+            logger.warning(
                 f"[CRC WARNING] Mismatch! Expected: {expected_crc_hex}, Computed: {computed_crc_hex}")
 
-        # --- 4. SAVE TO RAMDISK (FOR ML PROCESSING) ---
-        # Create a specific directory for the trap if it doesn't exist
-        trap_ram_dir = os.path.join(SAVE_DIR, trap_id)
-        os.makedirs(trap_ram_dir, exist_ok=True)
-
-        ram_filepath = os.path.join(trap_ram_dir, image_filename)
-        with open(ram_filepath, "wb") as f:
-            f.write(image_bytes)
-        print(f"[RAMDISK] Image saved for ML: {ram_filepath}")
-
-        # --- 5. STEP 1: VALIDATE TRAP EXISTS ---
-        # Using maybe_single() to avoid PGRST116 error if trap isn't in DB
+        # --- 4. STEP 1: VALIDATE TRAP EXISTS ---
         trap_check = supabase.table("traps").select("id").eq(
             "trap_id", trap_id).maybe_single().execute()
         if not trap_check.data:
             return jsonify({"success": False, "error": f"Trap not found: {trap_id}"}), 404
 
-        # --- 6. STEP 2: STORAGE UPLOAD (Cloud Backup) ---
-        image_path = f"{trap_id}/{image_filename}"
-        supabase.storage.from_("trap-images").upload(
-            path=image_path,
-            file=image_bytes,
-            file_options={"content-type": "image/jpeg", "upsert": "true"}
-        )
+        # --- 5. STEP 2: RUN ML INFERENCE ---
+        logger.info(
+            f"[INFERENCE] Starting YOLOv8 inference for trap {trap_id}...")
+        counts, annotated_bytes, inference_time_ms, inference_error = process_inference(
+            image_bytes)
 
-        # --- 7. STEP 3: INSERT IMAGE_UPLOADS ---
-        upload_data = {
-            "trap_id": trap_id,
-            "captured_at": captured_at,
-            "gps_lat": float(gps_lat) if gps_lat else None,
-            "gps_lon": float(gps_lon) if gps_lon else None,
-            "ldr_value": int(float(ldr_value)) if ldr_value else None,
-            "is_fallen": is_fallen,
-            "battery_voltage": int(battery_voltage) if battery_voltage else None,
-            "solar_voltage": int(solar_voltage) if solar_voltage else None,
-            "image_path": image_path,
-            "image_filename": image_filename,
-            "image_size_bytes": len(image_bytes),
-            "content_type": "image/jpeg",
-            "upload_status": "uploaded"
-        }
-# htt
-        db_res = supabase.table("image_uploads").insert(upload_data).execute()
-        if not db_res.data:
-            raise Exception("Failed to insert image_uploads record")
+        total_beetles = sum(counts.values()) if counts else 0
+        image_upload_id = None
 
-        image_upload_id = db_res.data[0]['id']
+        logger.info(f"[INFERENCE RESULT] Males: {counts.get('male', 0) if counts else 'N/A'}, "
+                    f"Females: {counts.get('female', 0) if counts else 'N/A'}, "
+                    f"Unknown: {counts.get('unknown', 0) if counts else 'N/A'}, "
+                    f"Total: {total_beetles}, "
+                    f"Time: {inference_time_ms}ms")
 
-        # --- 8. STEP 4: UPDATE TRAPS TABLE WITH LATEST VOLTAGE READINGS ---
-        # Sync battery_voltage and solar_voltage to the traps table for real-time monitoring
-        trap_update_data = {
-            "battery_voltage": float(battery_voltage) if battery_voltage else None,
-            "solar_voltage": float(solar_voltage) if solar_voltage else None,
-            "last_voltage_update": datetime.utcnow().isoformat()
-        }
-        traps_update = supabase.table("traps").update(trap_update_data).eq(
-            "trap_id", trap_id).execute()
-        print(f"[TRAPS UPDATE] Voltage data synced for trap {trap_id}")
+        # --- 6. CONDITIONAL: ONLY UPLOAD IF BEETLES DETECTED ---
+        if total_beetles > 0 and annotated_bytes and not inference_error:
+            logger.info(
+                f"[UPLOAD] Beetle(s) detected! Uploading annotated image...")
 
-        # --- 9. STEP 5: INSERT DETECTION_RESULTS PLACEHOLDER ---
-        detection_res = supabase.table("detection_results").insert({
-            "image_upload_id": image_upload_id,
-            "beetle_count": 0,
-            "male_count": 0,
-            "female_count": 0,
-            "unknown_count": 0,
-            "remarks": "Pending processing (RPi Bridge)"
-        }).execute()
+            try:
+                # 6A. SAVE ANNOTATED IMAGE TO RAMDISK (Optional for debug)
+                trap_ram_dir = os.path.join(SAVE_DIR, trap_id)
+                os.makedirs(trap_ram_dir, exist_ok=True)
+                ram_filepath = os.path.join(
+                    trap_ram_dir, f"annotated-{image_filename}")
+                with open(ram_filepath, "wb") as f:
+                    f.write(annotated_bytes)
+                logger.info(f"[RAMDISK] Annotated image saved: {ram_filepath}")
 
+                # 6B. UPLOAD ANNOTATED IMAGE TO SUPABASE STORAGE
+                image_path = f"{trap_id}/annotated-{image_filename}"
+                supabase.storage.from_("trap-images").upload(
+                    path=image_path,
+                    file=annotated_bytes,
+                    file_options={
+                        "content-type": "image/jpeg", "upsert": "true"}
+                )
+                logger.info(f"[STORAGE] Uploaded to: {image_path}")
+
+                # 6C. INSERT IMAGE_UPLOADS RECORD
+                upload_data = {
+                    "trap_id": trap_id,
+                    "captured_at": captured_at,
+                    "gps_lat": float(gps_lat) if gps_lat else None,
+                    "gps_lon": float(gps_lon) if gps_lon else None,
+                    "ldr_value": int(float(ldr_value)) if ldr_value else None,
+                    "is_fallen": is_fallen,
+                    "battery_voltage": int(battery_voltage) if battery_voltage else None,
+                    "solar_voltage": int(solar_voltage) if solar_voltage else None,
+                    "image_path": image_path,
+                    "image_filename": f"annotated-{image_filename}",
+                    "image_size_bytes": len(annotated_bytes),
+                    "content_type": "image/jpeg",
+                    "upload_status": "uploaded"
+                }
+                db_res = supabase.table("image_uploads").insert(
+                    upload_data).execute()
+                if not db_res.data:
+                    raise Exception("Failed to insert image_uploads record")
+
+                image_upload_id = db_res.data[0]['id']
+                logger.info(
+                    f"[DATABASE] image_uploads record created: id={image_upload_id}")
+
+                # 6D. INSERT DETECTION_RESULTS RECORD
+                detection_data = {
+                    "image_upload_id": image_upload_id,
+                    "beetle_count": total_beetles,
+                    "male_count": counts.get('male', 0),
+                    "female_count": counts.get('female', 0),
+                    "unknown_count": counts.get('unknown', 0),
+                    "inference_time_ms": inference_time_ms,
+                    "model_name": "YOLOv8-NCNN-Custom",
+                    "remarks": "Processed on-device (Raspberry Pi)"
+                }
+                detection_res = supabase.table(
+                    "detection_results").insert(detection_data).execute()
+                logger.info(f"[DATABASE] detection_results record created")
+
+            except Exception as e:
+                logger.error(
+                    f"[UPLOAD ERROR] Failed to process positive detection: {e}")
+                return jsonify({
+                    "success": False,
+                    "error": f"Upload failed: {str(e)}",
+                    "inference_result": {
+                        "detected": True,
+                        "counts": counts if counts else {},
+                        "inference_time_ms": inference_time_ms
+                    }
+                }), 500
+
+        elif total_beetles == 0:
+            logger.info(
+                f"[NO DETECTION] No beetles detected. Skipping upload and DB insertion.")
+        else:
+            logger.warning(f"[INFERENCE ERROR] {inference_error}")
+
+        # --- 7. ALWAYS UPDATE TRAPS TABLE WITH VOLTAGE TELEMETRY ---
+        try:
+            trap_update_data = {
+                "battery_voltage": float(battery_voltage) if battery_voltage else None,
+                "solar_voltage": float(solar_voltage) if solar_voltage else None,
+                "last_voltage_update": datetime.utcnow().isoformat()
+            }
+            traps_update = supabase.table("traps").update(
+                trap_update_data).eq("trap_id", trap_id).execute()
+            logger.info(f"[TELEMETRY] Voltage data synced for trap {trap_id}")
+        except Exception as e:
+            logger.error(
+                f"[TELEMETRY ERROR] Failed to update traps table: {e}")
+
+        # --- 8. FINAL JSON RESPONSE ---
         return jsonify({
             "success": True,
-            "message": "Image synced to RAM and Cloud",
-            "ram_path": ram_filepath,
+            "detected": total_beetles > 0,
+            "counts": counts if counts else {"male": 0, "female": 0, "unknown": 0},
             "image_upload_id": image_upload_id,
-            "computed_crc32": computed_crc_hex
+            "inference_time_ms": inference_time_ms,
+            "inference_error": inference_error,
+            "platform_action": "flip" if total_beetles > 0 else "stay",
+            "message": "Positive detection recorded and uploaded" if total_beetles > 0 else "No beetles detected"
         }), 200
 
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        logger.error(f"[CRITICAL ERROR] Unexpected error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
