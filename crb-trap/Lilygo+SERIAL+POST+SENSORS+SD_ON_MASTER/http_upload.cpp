@@ -1,7 +1,6 @@
 /**
  * @file      http_upload.cpp
- * @brief     Modem init plus raw binary POST upload to /echo-test.
- *            Optimized to keep modem / data session warm when possible.
+ * @brief     Modem init plus raw binary POST upload to /upload-trap-image.
  * @license   MIT
  * @copyright Copyright (c) 2026
  */
@@ -22,19 +21,9 @@
 // ==================== MODULE-LOCAL MODEM ====================
 
 static TinyGsm modem(SerialAT);
-static bool modemInitialized = false;
-
-// Reuse window bookkeeping only for logging / behavior hints.
-// Even if the ESP32 resets and this is lost, warm detection still works
-// because we probe the modem with AT first.
-static unsigned long lastModemUseMs = 0;
 
 // ==================== TUNABLES ====================
-// How long we consider the modem "recently used" for log purposes.
-static const unsigned long MODEM_WARM_HINT_MS = 5UL * 60UL * 1000UL;
-
 // Retry counts / timeouts
-static const int AT_PROBE_TRIES = 3;
 static const int NETWORK_REG_MAX_RETRIES = 60;
 static const int PDP_ACTIVATION_RETRIES = 3;
 
@@ -143,6 +132,58 @@ static String buildUploadTrapImageUrl(const UploadMetadata &meta,
   return url;
 }
 
+// Forward declarations for globals (defined in main .ino file)
+extern char g_servo_action[32];
+extern uint8_t g_servo_angle;
+
+static void parseServoActionFromResponse(const String &jsonBody) {
+  // Simple JSON parsing for servo_action and servo_angle
+  // Expected format: {"servo_action": "servo_male", "servo_angle": 45, ...}
+
+  if (jsonBody.length() == 0)
+    return;
+
+  // Extract servo_action
+  int actionStart = jsonBody.indexOf("\"servo_action\"");
+  if (actionStart != -1) {
+    int valueStart = jsonBody.indexOf("\"", actionStart + 16);
+    if (valueStart != -1) {
+      int valueEnd = jsonBody.indexOf("\"", valueStart + 1);
+      if (valueEnd != -1) {
+        String action = jsonBody.substring(valueStart + 1, valueEnd);
+        if (action.length() > 0 && action.length() < 32) {
+          action.toCharArray(g_servo_action, 32);
+          Serial.printf("[SERVO] Parsed servo_action: %s\n", g_servo_action);
+        }
+      }
+    }
+  }
+
+  // Extract servo_angle
+  int angleStart = jsonBody.indexOf("\"servo_angle\"");
+  if (angleStart != -1) {
+    int valueStart = angleStart + 14;
+    // Skip colon and whitespace
+    while (valueStart < (int)jsonBody.length() &&
+           (jsonBody[valueStart] == ':' || jsonBody[valueStart] == ' ')) {
+      valueStart++;
+    }
+    // Parse numeric value
+    int valueEnd = valueStart;
+    while (valueEnd < (int)jsonBody.length() && isdigit(jsonBody[valueEnd])) {
+      valueEnd++;
+    }
+    if (valueEnd > valueStart) {
+      String angleStr = jsonBody.substring(valueStart, valueEnd);
+      uint8_t angle = (uint8_t)angleStr.toInt();
+      if (angle >= 0 && angle <= 180) {
+        g_servo_angle = angle;
+        Serial.printf("[SERVO] Parsed servo_angle: %d°\n", g_servo_angle);
+      }
+    }
+  }
+}
+
 static void beginModemSerial() {
   SerialAT.begin(MODEM_BAUDRATE, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
   delay(100);
@@ -167,16 +208,6 @@ static void configureModemPinsForAwakeState() {
   pinMode(MODEM_RESET_PIN, OUTPUT);
   digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL);
 #endif
-}
-
-static bool modemRespondsToAT() {
-  for (int i = 0; i < AT_PROBE_TRIES; i++) {
-    if (modem.testAT(1000)) {
-      return true;
-    }
-    delay(150);
-  }
-  return false;
 }
 
 static void hardResetAndPowerOnModem() {
@@ -315,39 +346,15 @@ static bool ensureDataSession() {
   return false;
 }
 
-static bool tryWarmModemRecovery() {
-  beginModemSerial();
-  configureModemPinsForAwakeState();
-
-  if (!modemRespondsToAT()) {
-    return false;
+bool initModem() {
+  // Guard: prevent re-initialization if modem already initialized
+  static bool modemInitialized = false;
+  if (modemInitialized) {
+    Serial.println("[MODEM] Modem already initialized, skipping re-init");
+    return true;
   }
 
-  Serial.println("[MODEM] Warm modem detected — skipping reset / re-init");
-
-  if (!ensureSimReady()) {
-    return false;
-  }
-
-  if (!ensureRegistered()) {
-    return false;
-  }
-
-  if (!ensureDataSession()) {
-    return false;
-  }
-
-  modemInitialized = true;
-  lastModemUseMs = millis();
-  return true;
-}
-
-static bool coldBootModemAndAttach() {
-  // Reduce CPU frequency to minimize current draw during modem power-up
-  // This leaves more current available for the modem rails on battery
-  Serial.println("[MODEM] Reducing CPU freq to 80 MHz for power-up...");
-  setCpuFrequencyMhz(80);
-
+  Serial.println("[MODEM] Performing cold modem bring-up...");
   beginModemSerial();
   configureModemPinsForAwakeState();
   hardResetAndPowerOnModem();
@@ -355,10 +362,6 @@ static bool coldBootModemAndAttach() {
   // Critical: Wait for voltage rails to stabilize after the power spike
   Serial.println("[MODEM] Settling power rails...");
   delay(500);
-
-  // Restore full CPU speed before AT communication
-  Serial.println("[MODEM] Restoring CPU freq to 240 MHz...");
-  setCpuFrequencyMhz(240);
 
   if (!waitForATAfterBoot()) {
     return false;
@@ -377,39 +380,8 @@ static bool coldBootModemAndAttach() {
   }
 
   modemInitialized = true;
-  lastModemUseMs = millis();
+  Serial.println("[MODEM] Modem initialization complete and cached");
   return true;
-}
-
-// ==================== MODEM INITIALISATION ====================
-
-bool initModem() {
-  unsigned long now = millis();
-
-  if (modemInitialized) {
-    Serial.println("[MODEM] Cached modem state present, verifying...");
-    if (tryWarmModemRecovery()) {
-      if ((now - lastModemUseMs) <= MODEM_WARM_HINT_MS) {
-        Serial.println("[MODEM] Reusing warm modem/data session");
-      }
-      return true;
-    }
-
-    Serial.println("[MODEM] Cached state stale; falling back to cold init");
-    modemInitialized = false;
-  }
-
-  // Important optimization:
-  // Even if the ESP32 restarted and lost modemInitialized, the modem may still
-  // be powered and registered. Probe first before forcing a reset.
-  Serial.println("[MODEM] Probing for already-alive modem...");
-  if (tryWarmModemRecovery()) {
-    Serial.println("[MODEM] Warm modem/data session recovered");
-    return true;
-  }
-
-  Serial.println("[MODEM] No warm session found, doing full initialization...");
-  return coldBootModemAndAttach();
 }
 
 // ==================== PHOTO UPLOAD ====================
@@ -440,13 +412,9 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
   Serial.printf("[HTTP] filename=%s\n", filename.c_str());
   Serial.printf("[HTTP] URL: %s\n", uploadUrl.c_str());
 
-  // Even when the modem/data session is kept warm, we still start and end
-  // the HTTPS transaction per request. This is much safer with SIMCOM HTTP(S)
-  // AT flows while still avoiding the biggest delay sources:
-  // modem boot, network registration, and PDP activation.
+  // Start HTTPS transaction for this request
   if (!modem.https_begin()) {
     Serial.println("[HTTP] HTTPS init failed");
-    modemInitialized = false;
     return -1;
   }
 
@@ -499,15 +467,15 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
   String body = modem.https_body();
   if (body.length() > 0) {
     Serial.printf("[HTTP] /upload-trap-image response: %s\n", body.c_str());
+    // Parse servo action from response if upload was successful
+    if (httpCode == 200) {
+      parseServoActionFromResponse(body);
+    }
   } else {
     Serial.println("[HTTP] /upload-trap-image response body is empty");
   }
 
   modem.https_end();
-
-  // Mark the modem as recently usable for the next cycle.
-  modemInitialized = true;
-  lastModemUseMs = millis();
 
   return httpCode;
 }

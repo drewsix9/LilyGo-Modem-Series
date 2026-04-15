@@ -47,8 +47,15 @@ void initializeSCCBBus();
  * @param frameSize    Target FRAMESIZE_* constant.
  * @param jpegQuality  JPEG quality (1–63; lower = better).
  * @return true on success, false on error.
+ * @note Enables horizontal flip (mirror) by default.
  */
 bool initCamera(framesize_t frameSize, uint8_t jpegQuality);
+
+/**
+ * @brief Set horizontal flip (mirror) mode after camera initialization.
+ * @param enabled true to flip horizontally, false for normal orientation.
+ */
+void setHorizontalFlip(bool enabled);
 
 /**
  * @brief Capture a JPEG photo, optionally save to SD card, and stream to master via UART.

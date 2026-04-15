@@ -24,6 +24,7 @@
 #include "http_upload.h"
 #include "power_manager.h"
 #include "sensor.h"
+#include "servo_controller.h"
 #include "soc/rtc_cntl_reg.h"
 #include "soc/soc.h"
 #include "uart_master.h"
@@ -41,6 +42,43 @@
 
 // ==================== TIMING ====================
 #define CAM_BOOT_TIME_MS 2500 // Camera power-on to WiFi-ready delay (ms)
+
+// ==================== SERVO CONFIGURATION ====================
+#define SERVO_PIN 13 // GPIO13 for servo control (configurable)
+#define SERVO_MIN_PULSE_US 500
+#define SERVO_MAX_PULSE_US 2400
+
+// ==================== SERVO HELPER FUNCTION ====================
+void executeServoAction(const char *servo_action, uint8_t servo_angle) {
+  if (!ServoController::attached()) {
+    Serial.println("[SERVO] Servo not initialized, skipping action");
+    return;
+  }
+
+  if (strcmp(servo_action, "servo_male") == 0) {
+    Serial.printf("[SERVO] Executing MALE action: moving to 45°\n");
+    ServoController::writeAngle(45);
+  } else if (strcmp(servo_action, "servo_female") == 0) {
+    Serial.printf("[SERVO] Executing FEMALE action: moving to 135°\n");
+    ServoController::writeAngle(135);
+  } else if (strcmp(servo_action, "servo_neutral") == 0) {
+    Serial.printf("[SERVO] Executing NEUTRAL action: moving to 90°\n");
+    ServoController::writeAngle(90);
+  } else if (strcmp(servo_action, "no_action") == 0) {
+    Serial.println("[SERVO] No beetles detected, servo remains at current position");
+  } else {
+    Serial.printf("[SERVO] Unknown action: %s, moving to provided angle: %d°\n",
+                  servo_action, servo_angle);
+    ServoController::writeAngle(servo_angle);
+  }
+
+  delay(500); // Allow servo time to reach target position
+}
+
+// ==================== GLOBALS FOR API RESPONSE DATA ====================
+// These are populated by http_upload.h after receiving API response
+char g_servo_action[32] = "no_action";
+uint8_t g_servo_angle = 90;
 
 // ==================== SETUP ====================
 void setup() {
@@ -83,6 +121,11 @@ void setup() {
   // Initialize SD card on master for archiving CRC-verified received photos.
   bool sdReady = initSDCard();
   Serial.printf("[SD] Master SD archive status: %s\n", sdReady ? "READY" : "UNAVAILABLE");
+
+  // Initialize servo for sex-based separation
+  bool servoReady = ServoController::begin(SERVO_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US, 90);
+  Serial.printf("[SERVO] Servo init status: %s (pin %d, start angle 90°)\n",
+                servoReady ? "OK" : "FAILED", SERVO_PIN);
 
   // ==================== HANDLE WAKEUP EVENT ====================
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
@@ -156,6 +199,11 @@ void setup() {
 
       if (!photoSuccess) {
         Serial.printf("[FAIL] All %d photo attempts failed!\n", PHOTO_MAX_RETRIES);
+      } else {
+        // Execute servo action based on API response (populated by http_upload module)
+        Serial.printf("[SERVO] Executing action from API: '%s' (angle: %d°)\n",
+                      g_servo_action, g_servo_angle);
+        executeServoAction(g_servo_action, g_servo_angle);
       }
 
     } else {
@@ -167,18 +215,26 @@ void setup() {
     cleanupESPNOW();
 
   } else {
-    // First boot or manual reset — run a quick power-cycle smoke test
-    Serial.println("\n[BOOT] First boot or reset detected");
-    Serial.println("[TEST] Testing camera power control...");
-    powerOnCamera();
-    delay(1000);
-    powerOffCamera();
-    Serial.println("[TEST] Power control test completed");
+    // // First boot or manual reset — run a quick power-cycle smoke test
+    // Serial.println("\n[BOOT] First boot or reset detected");
+    // Serial.println("[TEST] Testing camera power control...");
+    // powerOnCamera();
+    // delay(1000);
+    // powerOffCamera();
+    // Serial.println("[TEST] Power control test completed");
   }
 
   // ==================== CONFIGURE AND ENTER DEEP SLEEP ====================
   pinMode(PIR_SENSOR_PIN, INPUT_PULLDOWN);
   gpio_pulldown_en((gpio_num_t)PIR_SENSOR_PIN);
+
+  // Reset servo to neutral (90°) before sleep
+  if (ServoController::attached()) {
+    Serial.println("[SERVO] Resetting servo to neutral (90°) before sleep...");
+    ServoController::writeAngle(90);
+    delay(500);
+    Serial.println("[SERVO] Servo reset to neutral complete");
+  }
 
   Serial.println("\n[CONFIG] System configuration:");
   Serial.println("  - Wakeup source: GPIO32 (PIR Sensor)");

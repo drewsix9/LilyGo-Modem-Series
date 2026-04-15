@@ -1,3 +1,7 @@
+"""
+CRB Trap Image Processing Backend
+Handles beetle detection, classification, and trap control
+"""
 from flask import Flask, request, jsonify
 import zlib
 import os
@@ -30,13 +34,72 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Load the custom trained model in NCNN format for Raspberry Pi optimization
 # Export your model to NCNN: yolo export model=path/to/best.pt format=ncnn imgsz=640
 MODEL_PATH = os.getenv(
-    "YOLO_MODEL_PATH", "/path/to/best-ncnn_model/best.ncnn.param")
+    "YOLO_MODEL_PATH", "~/crb-backend/best_ncnn_model")
+MODEL_PATH = os.path.expanduser(MODEL_PATH)
+
+# Validate NCNN model files exist
+
+
+def validate_ncnn_model(model_path):
+    """Validate that both .param and .bin files exist for NCNN model"""
+    # If model_path is a directory, look for model.ncnn.param and model.ncnn.bin inside
+    if os.path.isdir(model_path):
+        param_path = os.path.join(model_path, "model.ncnn.param")
+        bin_path = os.path.join(model_path, "model.ncnn.bin")
+    else:
+        # If it's a file path, derive bin from param
+        if model_path.endswith('.param'):
+            param_path = model_path
+            bin_path = model_path.replace('.param', '.bin')
+        else:
+            param_path = model_path + '.param'
+            bin_path = model_path + '.bin'
+
+    param_exists = os.path.exists(param_path)
+    bin_exists = os.path.exists(bin_path)
+
+    if not param_exists:
+        logger.error(f"NCNN .param file not found: {param_path}")
+        return False
+
+    if not bin_exists:
+        logger.error(f"NCNN .bin file not found: {bin_path}")
+        logger.error(
+            "NCNN models require both .param and .bin files in the same directory")
+        return False
+
+    return True
+
+
 try:
-    model = YOLO(MODEL_PATH)
-    logger.info(f"✓ YOLOv8 NCNN model loaded from: {MODEL_PATH}")
+    if not validate_ncnn_model(MODEL_PATH):
+        logger.warning("Model validation failed, model will not be loaded")
+        model = None
+    else:
+        logger.info(f"[INIT] Loading model from: {MODEL_PATH}")
+        model = YOLO(MODEL_PATH, task='detect')
+        logger.info(
+            f"[OK] YOLOv8 model loaded successfully from: {MODEL_PATH}")
 except Exception as e:
-    logger.error(f"✗ Failed to load YOLOv8 model: {e}")
+    logger.error(f"[FAIL] Failed to load YOLOv8 model at startup: {e}")
+    logger.error(
+        "Ensure model files exist and are not corrupted. Model will be loaded on first inference attempt.")
     model = None
+
+
+def get_model():
+    """Get model instance, loading on first use if needed (lazy-load fallback)"""
+    global model
+    if model is None:
+        logger.warning(
+            f"[LAZY-LOAD] Model not loaded at startup, attempting to load now...")
+        try:
+            model = YOLO(MODEL_PATH, task='detect')
+            logger.info(f"[OK] Model lazy-loaded successfully")
+        except Exception as e:
+            logger.error(f"[FAIL] Failed to lazy-load model: {e}")
+            return None
+    return model
 
 
 # --- INFERENCE HELPER FUNCTION WITH ERROR HANDLING ---
@@ -52,30 +115,37 @@ def process_inference(image_bytes):
                - error_msg: None if successful, error string if failed
     """
     try:
-        if model is None:
-            return None, None, 0, "Model not loaded"
+        current_model = get_model()
+        if current_model is None:
+            logger.error("Model not loaded and lazy-load failed")
+            return None, None, 0, "Model not available"
 
         # Step 1: Decode image bytes to numpy array
         try:
+            logger.debug(f"[DECODE] Received {len(image_bytes)} bytes")
             nparr = np.frombuffer(image_bytes, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
             if img is None:
                 raise ValueError(
                     "Failed to decode image - invalid or corrupted format")
-            logger.info(f"✓ Image decoded: {img.shape}")
+            logger.info(f"[OK] Image decoded: {img.shape}")
         except Exception as e:
-            logger.error(f"✗ Image decode error: {e}")
+            logger.error(f"[FAIL] Image decode error: {e}")
             return None, None, 0, f"Image decode failed: {str(e)}"
 
         # Step 2: Run inference
         try:
+            logger.debug(
+                f"[INFERENCE] Starting inference on image shape: {img.shape}")
             inference_start = time.time()
-            results = model(img, conf=0.5, verbose=False)[0]
+            results = current_model(img, conf=0.5, verbose=False)[0]
             inference_time_ms = int((time.time() - inference_start) * 1000)
-            logger.info(f"✓ Inference complete: {inference_time_ms}ms")
+            logger.info(f"[OK] Inference complete: {inference_time_ms}ms")
         except Exception as e:
-            logger.error(f"✗ Inference error: {e}")
+            logger.error(f"[FAIL] Inference error: {e}")
+            logger.error(
+                f"[DEBUG] Model type: {type(current_model)}, Model path: {MODEL_PATH}")
             return None, None, 0, f"Inference failed: {str(e)}"
 
         # Step 3: Count detections by class
@@ -84,6 +154,7 @@ def process_inference(image_bytes):
 
             # results.names maps class index to label (e.g., {0: 'male', 1: 'female', 2: 'unknown'})
             if results.boxes is not None and len(results.boxes) > 0:
+                logger.debug(f"[BOXES] Found {len(results.boxes)} detections")
                 for box in results.boxes:
                     try:
                         cls_id = int(box.cls[0])
@@ -102,13 +173,14 @@ def process_inference(image_bytes):
 
             total_beetles = sum(counts.values())
             logger.info(
-                f"✓ Detection counts: Male={counts['male']}, Female={counts['female']}, Unknown={counts['unknown']}, Total={total_beetles}")
+                f"[OK] Detection counts: Male={counts['male']}, Female={counts['female']}, Unknown={counts['unknown']}, Total={total_beetles}")
         except Exception as e:
-            logger.error(f"✗ Box parsing error: {e}")
+            logger.error(f"[FAIL] Box parsing error: {e}")
             return None, None, inference_time_ms, f"Failed to parse detections: {str(e)}"
 
         # Step 4: Annotate image if beetles found
         try:
+            logger.debug("[ANNOTATE] Plotting results...")
             annotated_img = results.plot()
 
             # Encode annotated image back to bytes
@@ -119,16 +191,18 @@ def process_inference(image_bytes):
 
             annotated_bytes = buffer.tobytes()
             logger.info(
-                f"✓ Image annotated and encoded: {len(annotated_bytes)} bytes")
+                f"[OK] Image annotated and encoded: {len(annotated_bytes)} bytes")
         except Exception as e:
-            logger.error(f"✗ Image annotation error: {e}")
+            logger.error(f"[FAIL] Image annotation error: {e}")
             return counts, None, inference_time_ms, f"Annotation failed: {str(e)}"
 
         # Successful inference
         return counts, annotated_bytes, inference_time_ms, None
 
     except Exception as e:
-        logger.error(f"✗ Unexpected error in process_inference: {e}")
+        logger.error(f"[FAIL] Unexpected error in process_inference: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None, None, 0, f"Unexpected error: {str(e)}"
 
 
@@ -240,6 +314,19 @@ def upload_trap_image():
                     f"Total: {total_beetles}, "
                     f"Time: {inference_time_ms}ms")
 
+        # --- 5A. ALWAYS SAVE RAW IMAGE FOR DEBUGGING ---
+        try:
+            trap_ram_dir = os.path.join(SAVE_DIR, trap_id)
+            os.makedirs(trap_ram_dir, exist_ok=True)
+            raw_filepath = os.path.join(
+                trap_ram_dir, f"raw-{image_filename}")
+            with open(raw_filepath, "wb") as f:
+                f.write(image_bytes)
+            logger.info(
+                f"[RAMDISK] Raw image saved for debugging: {raw_filepath}")
+        except Exception as e:
+            logger.error(f"[RAMDISK ERROR] Failed to save raw image: {e}")
+
         # --- 6. CONDITIONAL: ONLY UPLOAD IF BEETLES DETECTED ---
         if total_beetles > 0 and annotated_bytes and not inference_error:
             logger.info(
@@ -331,6 +418,13 @@ def upload_trap_image():
                 "solar_voltage": float(solar_voltage) if solar_voltage else None,
                 "last_voltage_update": datetime.utcnow().isoformat()
             }
+
+            # If trap is fallen, mark as inactive
+            if is_fallen:
+                trap_update_data["status"] = "inactive"
+                logger.info(
+                    f"[STATUS UPDATE] Trap {trap_id} marked as INACTIVE (fallen detected)")
+
             traps_update = supabase.table("traps").update(
                 trap_update_data).eq("trap_id", trap_id).execute()
             logger.info(f"[TELEMETRY] Voltage data synced for trap {trap_id}")
@@ -338,7 +432,36 @@ def upload_trap_image():
             logger.error(
                 f"[TELEMETRY ERROR] Failed to update traps table: {e}")
 
-        # --- 8. FINAL JSON RESPONSE ---
+        # --- 8. DETERMINE SERVO ACTION BASED ON BEETLE COUNTS ---
+        servo_action = "no_action"  # Default: no beetles detected
+        servo_angle = 90  # Neutral position
+
+        if total_beetles > 0 and counts:
+            male_count = counts.get('male', 0)
+            female_count = counts.get('female', 0)
+
+            if male_count > female_count:
+                servo_action = "servo_male"
+                servo_angle = 45
+                logger.info(
+                    f"[SERVO] Male majority ({male_count} male, {female_count} female) -> 45 degrees")
+            elif female_count > male_count:
+                servo_action = "servo_female"
+                servo_angle = 135
+                logger.info(
+                    f"[SERVO] Female majority ({female_count} female, {male_count} male) -> 135 degrees")
+            else:
+                # Tie or both zero - default to male
+                servo_action = "servo_male"
+                servo_angle = 45
+                logger.info(
+                    f"[SERVO] Tie or equal counts -> default to male at 45 degrees")
+
+        # --- 9. RESET SERVO TO NEUTRAL BEFORE SLEEP ---
+        logger.info(
+            f"[SERVO] Returning servo to neutral position (90 degrees) before sleep")
+
+        # --- 10. FINAL JSON RESPONSE ---
         return jsonify({
             "success": True,
             "detected": total_beetles > 0,
@@ -346,7 +469,8 @@ def upload_trap_image():
             "image_upload_id": image_upload_id,
             "inference_time_ms": inference_time_ms,
             "inference_error": inference_error,
-            "platform_action": "flip" if total_beetles > 0 else "stay",
+            "servo_action": servo_action,
+            "servo_angle": servo_angle,
             "message": "Positive detection recorded and uploaded" if total_beetles > 0 else "No beetles detected"
         }), 200
 

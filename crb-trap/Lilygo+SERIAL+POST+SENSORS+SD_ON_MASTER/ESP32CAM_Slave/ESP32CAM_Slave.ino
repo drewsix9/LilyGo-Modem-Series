@@ -91,7 +91,7 @@ void setup() {
   WiFi.mode(WIFI_OFF);
   btStop();
   Serial.println("[WIFI/BT] Disabled for low-power UART mode");
-  
+
   // Initialize UART transport to master
   if (!scanAndPairWithMaster()) {
     Serial.println("[UART] FATAL: Could not initialize UART link, restarting...");
