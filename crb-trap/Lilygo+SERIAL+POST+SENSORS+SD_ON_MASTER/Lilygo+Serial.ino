@@ -21,6 +21,8 @@
  */
 
 #include "ESP32CAM_Slave/sdcard.h"
+#include "gps_reader.h"
+#include "gps_storage.h"
 #include "http_upload.h"
 #include "power_manager.h"
 #include "sensor.h"
@@ -116,7 +118,8 @@ void setup() {
   Serial.printf("[SENSOR] Sensor init status: %s\n", sensorsReady ? "OK" : "PARTIAL/FAILED");
 
   // SD module uses EEPROM counter bytes [0..1] for rolling filenames.
-  EEPROM.begin(2);
+  // GPS storage uses bytes [2..10] for cached position + validity flag.
+  EEPROM.begin(16);
 
   // Initialize SD card on master for archiving CRC-verified received photos.
   bool sdReady = initSDCard();
@@ -126,6 +129,22 @@ void setup() {
   bool servoReady = ServoController::begin(SERVO_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US, 90);
   Serial.printf("[SERVO] Servo init status: %s (pin %d, start angle 90°)\n",
                 servoReady ? "OK" : "FAILED", SERVO_PIN);
+
+  // ==================== INITIALIZE GPS ON COLD BOOT ONLY ====================
+  // If this is cold boot (not PIR deep-sleep wakeup), read GPS and cache it.
+  // GPS stays OFF during PIR wakeup cycles to save power.
+  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT0) {
+    Serial.println("\n[BOOT] Cold boot detected, initializing GPS for metadata...");
+    // Initialize modem first (required for GPS reads)
+    if (initModem()) {
+      initGPS(); // Populates g_gps_lat, g_gps_lon, g_gps_valid
+    } else {
+      Serial.println("[GPS] Modem init failed, skipping GPS read");
+      // Fallback: loadGPSFromEEPROM or use defaults is handled by initGPS logic
+    }
+  } else {
+    Serial.println("\n[BOOT] PIR wakeup detected, skipping GPS initialization");
+  }
 
   // ==================== HANDLE WAKEUP EVENT ====================
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {

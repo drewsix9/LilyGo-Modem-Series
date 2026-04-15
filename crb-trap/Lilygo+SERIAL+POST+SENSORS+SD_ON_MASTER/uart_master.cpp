@@ -424,7 +424,7 @@ bool receivePhoto() {
     voltCfg.avg_samples = 20;
     voltCfg.sample_delay_ms = 30;
     voltCfg.apply_divider_correction = true;
-    
+
     if (initVoltageReader(voltCfg)) {
       voltageReaderInitialized = true;
       Serial.println("[VOLT] Voltage reader initialized");
@@ -440,7 +440,7 @@ bool receivePhoto() {
 
   if (voltageReaderInitialized) {
     VoltageReading voltReading = readBothVoltagesMv();
-    
+
     if (voltReading.battery_valid) {
       snprintf(capturedBatteryVoltageStr, sizeof(capturedBatteryVoltageStr), "%lu", voltReading.battery_mv);
       Serial.printf("[VOLT] Battery: %s mV\n", capturedBatteryVoltageStr);
@@ -462,13 +462,20 @@ bool receivePhoto() {
     // Leave solarVoltageStr empty
   }
 
+  // ==================== FORMAT GPS FOR METADATA ====================
+  char capturedGpsLatStr[16], capturedGpsLonStr[16];
+  snprintf(capturedGpsLatStr, sizeof(capturedGpsLatStr), "%.6f", g_gps_lat);
+  snprintf(capturedGpsLonStr, sizeof(capturedGpsLonStr), "%.6f", g_gps_lon);
+  Serial.printf("[GPS] Using for metadata: lat=%s, lon=%s, valid=%s\n",
+                capturedGpsLatStr, capturedGpsLonStr, g_gps_valid ? "true" : "false");
+
   // ==================== UPLOAD METADATA ====================
   // Upload photo to Supabase via A7670 modem.
   UploadMetadata meta;
   meta.trapId = DEFAULT_TRAP_ID;
   meta.capturedAt = DEFAULT_CAPTURED_AT;
-  meta.gpsLat = DEFAULT_GPS_LAT;
-  meta.gpsLon = DEFAULT_GPS_LON;
+  meta.gpsLat = capturedGpsLatStr;
+  meta.gpsLon = capturedGpsLonStr;
   meta.ldrValue = capturedLuxValue;
   meta.isFallen = capturedIsFallen ? "true" : "false";
   meta.batteryVoltage = capturedBatteryVoltageStr;

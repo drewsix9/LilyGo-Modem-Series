@@ -411,11 +411,13 @@ def upload_trap_image():
         else:
             logger.warning(f"[INFERENCE ERROR] {inference_error}")
 
-        # --- 7. ALWAYS UPDATE TRAPS TABLE WITH VOLTAGE TELEMETRY ---
+        # --- 7. ALWAYS UPDATE TRAPS TABLE WITH VOLTAGE TELEMETRY & GPS ---
         try:
             trap_update_data = {
                 "battery_voltage": float(battery_voltage) if battery_voltage else None,
                 "solar_voltage": float(solar_voltage) if solar_voltage else None,
+                "latitude": float(gps_lat) if gps_lat else None,
+                "longitude": float(gps_lon) if gps_lon else None,
                 "last_voltage_update": datetime.utcnow().isoformat()
             }
 
@@ -427,7 +429,8 @@ def upload_trap_image():
 
             traps_update = supabase.table("traps").update(
                 trap_update_data).eq("trap_id", trap_id).execute()
-            logger.info(f"[TELEMETRY] Voltage data synced for trap {trap_id}")
+            logger.info(
+                f"[TELEMETRY] Voltage & GPS data synced for trap {trap_id} (lat={gps_lat}, lon={gps_lon})")
         except Exception as e:
             logger.error(
                 f"[TELEMETRY ERROR] Failed to update traps table: {e}")

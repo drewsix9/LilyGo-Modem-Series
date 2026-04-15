@@ -29,6 +29,10 @@ extern volatile uint16_t lastAckedPacket;
 extern uint16_t capturedLuxValue;
 extern bool capturedIsFallen;
 
+extern float g_gps_lat;
+extern float g_gps_lon;
+extern bool g_gps_valid;
+
 // ==================== API ====================
 
 /**

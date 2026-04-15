@@ -18,9 +18,10 @@
 #endif
 #endif
 
-// ==================== MODULE-LOCAL MODEM ====================
+// ==================== GLOBAL MODEM ====================
+// Made global (non-static) so GPS reader and other modules can access it via extern declaration
 
-static TinyGsm modem(SerialAT);
+TinyGsm modem(SerialAT);
 
 // ==================== TUNABLES ====================
 // Retry counts / timeouts
