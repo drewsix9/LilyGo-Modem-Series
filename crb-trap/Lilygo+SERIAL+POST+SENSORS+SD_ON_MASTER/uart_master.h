@@ -39,13 +39,13 @@ extern bool g_gps_valid;
  * @brief Initialize UART transport and disable WiFi/Bluetooth for low power.
  *        Resets reception state and frees leftover photo buffers.
  */
-void initESPNOW();
+void initUART();
 
 /**
  * @brief Deinitialize UART transfer state and free photo buffer.
  *        WiFi and Bluetooth remain disabled.
  */
-void cleanupESPNOW();
+void cleanupUART();
 
 /**
  * @brief Block until slave sends READY line (or timeout).

@@ -129,6 +129,9 @@
 #define SerialGPS Serial2
 #endif
 
+#define MODEM_GPS_ENABLE_GPIO (-1)
+#define MODEM_GPS_ENABLE_LEVEL (-1)
+
 #elif defined(LILYGO_T_CALL_A7670_V1_0)
 
 #define MODEM_BAUDRATE (115200)

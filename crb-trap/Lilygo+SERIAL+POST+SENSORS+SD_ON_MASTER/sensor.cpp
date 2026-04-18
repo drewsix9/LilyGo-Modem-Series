@@ -12,10 +12,10 @@
 #include <Wire.h>
 #include <math.h>
 
-static BH1750 lightSensor(LOW); // 0x23 (ADDR low/open)
+// static BH1750 lightSensor(LOW); // 0x23 (ADDR low/open) — LIGHT SENSOR DISABLED
 static DFRobot_BMI160 bmi160;
 
-static bool bh1750Ready = false;
+// static bool bh1750Ready = false; — LIGHT SENSOR DISABLED
 static bool bmi160Ready = false;
 static uint16_t lastLuxValue = 0;
 static const int8_t BMI160_DEVICE_ADDR = 0x68;
@@ -23,11 +23,12 @@ static const float FALL_ANGLE_THRESHOLD_DEG = 60.0f;
 static const float FALL_ANGLE_UPPER_BOUND_DEG = 90.0f;
 
 bool initSensors() {
-  Serial.println("[SENSOR] Initializing BH1750...");
-  lightSensor.begin(ModeContinuous, ResolutionLow);
-  lightSensor.startConversion();
-  bh1750Ready = true;
-  Serial.println("[SENSOR] BH1750 initialized");
+  // BH1750 light sensor disabled
+  // Serial.println("[SENSOR] Initializing BH1750...");
+  // lightSensor.begin(ModeContinuous, ResolutionLow);
+  // lightSensor.startConversion();
+  // bh1750Ready = true;
+  // Serial.println("[SENSOR] BH1750 initialized");
 
   Serial.println("[SENSOR] Initializing BMI160...");
   if (bmi160.softReset() != BMI160_OK) {
@@ -41,21 +42,12 @@ bool initSensors() {
     bmi160Ready = true;
   }
 
-  return bh1750Ready && bmi160Ready;
+  return bmi160Ready; // Only BMI160 active (BH1750 disabled)
 }
 
 uint16_t readLuxSensor() {
-  if (!bh1750Ready) {
-    Serial.println("[SENSOR] BH1750 not initialized, returning cached LUX");
-    return lastLuxValue;
-  }
-
-  if (!lightSensor.isConversionCompleted()) {
-    return lastLuxValue;
-  }
-
-  lastLuxValue = lightSensor.read();
-  return lastLuxValue;
+  // BH1750 light sensor disabled — returning 0
+  return 0;
 }
 
 bool readBmi160Raw(Bmi160Reading &out) {

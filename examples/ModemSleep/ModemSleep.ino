@@ -51,7 +51,7 @@ void setup()
     digitalWrite(BOARD_POWERON_PIN, HIGH);
 #endif
 
-    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER) {
+    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER) { //
 
 #ifdef MODEM_RESET_PIN
         // Release reset GPIO hold

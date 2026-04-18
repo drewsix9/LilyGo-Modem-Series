@@ -64,13 +64,16 @@ void enterDeepSleep() {
   gpio_deep_sleep_hold_en();
 
   Serial.println("[GPIO] Camera power pin held HIGH (OFF) for deep sleep");
+
+  // Configure PIR for wakeup
+  Serial.printf("[GPIO] Configuring GPIO%d (PIR sensor) for EXT0 wakeup on HIGH level\n", PIR_SENSOR_PIN);
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIR_SENSOR_PIN, 1); // Wake on HIGH level
+
   Serial.println("[SLEEP] Entering deep sleep mode...");
   Serial.println("         Waiting for PIR motion detection...");
+  Serial.println("         (Board will wake on GPIO32 HIGH signal)");
   Serial.println("===========================================\n");
   Serial.flush();
-
-  // Wake on HIGH level from PIR sensor
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIR_SENSOR_PIN, 1); // TODO: Change this if using different PIR sensor with inverted logic
 
   delay(200);
   esp_deep_sleep_start();

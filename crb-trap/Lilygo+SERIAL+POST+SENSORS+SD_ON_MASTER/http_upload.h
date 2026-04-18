@@ -52,6 +52,18 @@ struct UploadMetadata {
 bool initModem();
 
 /**
+ * @brief  Wake the A7670 modem from sleep mode.
+ *         Cancels GPIO holds and pulls DTR low to signal wakeup.
+ */
+bool wakeupModem();
+
+/**
+ * @brief  Put the A7670 modem into sleep mode.
+ *         Pulls DTR high and sets GPIO holds to maintain state during ESP32 deep sleep.
+ */
+bool sleepModem();
+
+/**
  * @brief  POST a JPEG image (held in RAM) to the Supabase Edge Function.
  * @param  photoData  Pointer to the JPEG bytes in RAM (e.g. photoBuffer).
  * @param  photoSize  Byte count of the JPEG image.

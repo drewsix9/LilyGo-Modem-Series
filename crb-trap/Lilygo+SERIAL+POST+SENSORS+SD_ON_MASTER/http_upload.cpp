@@ -191,28 +191,47 @@ static void beginModemSerial() {
 }
 
 static void configureModemPinsForAwakeState() {
+
 #ifdef BOARD_POWERON_PIN
+  /* Set Power control pin output
+   * * @note      Known issues, ESP32 (V1.2) version of T-A7670, T-A7608,
+   *            when using battery power supply mode, BOARD_POWERON_PIN (IO12) must be set to high level after esp32 starts, otherwise a reset will occur.
+   * */
   pinMode(BOARD_POWERON_PIN, OUTPUT);
   digitalWrite(BOARD_POWERON_PIN, HIGH);
 #endif
 
-#ifdef MODEM_DTR_PIN
-  pinMode(MODEM_DTR_PIN, OUTPUT);
-  // Keep DTR low so the modem stays awake
-  digitalWrite(MODEM_DTR_PIN, LOW);
-#endif
-
-  pinMode(BOARD_PWRKEY_PIN, OUTPUT);
-  digitalWrite(BOARD_PWRKEY_PIN, LOW);
-
 #ifdef MODEM_RESET_PIN
+  // Release reset GPIO hold
+  gpio_hold_dis((gpio_num_t)MODEM_RESET_PIN);
+
+  // Set modem reset pin ,reset modem
+  // The module will also be started during reset.
+  Serial.println("[MODEM] Hardware reset pulse");
   pinMode(MODEM_RESET_PIN, OUTPUT);
   digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL);
+  delay(100);
+  digitalWrite(MODEM_RESET_PIN, MODEM_RESET_LEVEL);
+  delay(2600);
+  digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL);
 #endif
+
+  // Pull down DTR to wake up MODEM
+  pinMode(MODEM_DTR_PIN, OUTPUT);
+  digitalWrite(MODEM_DTR_PIN, LOW);
+
+  // Turn on the modem
+  pinMode(BOARD_PWRKEY_PIN, OUTPUT);
+  digitalWrite(BOARD_PWRKEY_PIN, LOW);
+  delay(100);
+  digitalWrite(BOARD_PWRKEY_PIN, HIGH);
+  delay(MODEM_POWERON_PULSE_WIDTH_MS);
+  digitalWrite(BOARD_PWRKEY_PIN, LOW);
 }
 
 static void hardResetAndPowerOnModem() {
-  Serial.println("[MODEM] Performing cold modem bring-up...");
+  // Release reset GPIO hold
+  gpio_hold_dis((gpio_num_t)MODEM_RESET_PIN);
 
 #ifdef MODEM_RESET_PIN
   Serial.println("[MODEM] Hardware reset pulse");
@@ -347,6 +366,95 @@ static bool ensureDataSession() {
   return false;
 }
 
+bool wakeupModem() {
+  Serial.println("[MODEM] Waking up modem from sleep...");
+
+  // Guard: Check if modem is already awake by testing AT command quickly
+  if (modem.testAT(500)) {
+    Serial.println("[MODEM] Modem already awake, skipping wakeup sequence");
+    return true;
+  }
+
+  // Release all GPIO holds from sleep state
+  Serial.println("[MODEM] Releasing GPIO holds from sleep...");
+  gpio_hold_dis((gpio_num_t)MODEM_DTR_PIN);
+
+  // #ifdef BOARD_POWERON_PIN
+  //   gpio_hold_dis((gpio_num_t)BOARD_POWERON_PIN);
+  // #endif
+
+#ifdef MODEM_RESET_PIN
+  gpio_hold_dis((gpio_num_t)MODEM_RESET_PIN);
+#endif
+
+  // CRITICAL: Let power rails settle after GPIO release (especially on battery)
+  Serial.println("[MODEM] Settling power rails after GPIO release (500ms)...");
+  delay(500);
+
+  // Initialize serial with modem
+  Serial.println("[MODEM] Initializing modem serial...");
+  beginModemSerial();
+  delay(200); // Give serial time to stabilize
+
+  // Pull down DTR to wake up MODEM
+  Serial.println("[MODEM] Pulling DTR LOW to signal wakeup...");
+  pinMode(MODEM_DTR_PIN, OUTPUT);
+  digitalWrite(MODEM_DTR_PIN, LOW);
+  delay(2000);
+
+  // Call modem firmware to exit sleep
+  Serial.println("[MODEM] Calling modem.sleepEnable(false) to exit sleep...");
+  modem.sleepEnable(false);
+
+  // Verify modem is responsive after wakeup
+  Serial.println("[MODEM] Verifying modem is awake...");
+  int retry = 0;
+  while (!modem.testAT(1000)) {
+    Serial.print(".");
+    if (retry++ > 10) {
+      Serial.println("\n[MODEM] Modem not responding after wakeup!");
+      return false;
+    }
+  }
+  Serial.println("\n[MODEM] Modem awake and responsive");
+  return true;
+}
+
+bool sleepModem() {
+  Serial.println("[MODEM] Putting modem to sleep...");
+
+  // Pull DTR high to signal modem to sleep
+  // Pull up DTR to put the modem into sleep
+  pinMode(MODEM_DTR_PIN, OUTPUT);
+  digitalWrite(MODEM_DTR_PIN, HIGH);
+  // Set DTR to keep at high level, if not set, DTR will be invalid after ESP32 goes to sleep.
+  gpio_hold_en((gpio_num_t)MODEM_DTR_PIN);
+  gpio_deep_sleep_hold_en();
+
+#ifdef BOARD_POWERON_PIN
+  // Keep power control at HIGH (power enabled) during sleep
+  gpio_hold_en((gpio_num_t)BOARD_POWERON_PIN);
+  gpio_deep_sleep_hold_en();
+#endif
+
+#ifdef MODEM_RESET_PIN
+  // Keep reset LOW during the sleep period. If the module uses GPIO5 as reset,
+  // there will be a pulse when waking up from sleep that will cause the module to start directly.
+  // See: https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/issues/85
+  digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL);
+  gpio_hold_en((gpio_num_t)MODEM_RESET_PIN);
+  gpio_deep_sleep_hold_en();
+#endif
+
+  if (modem.sleepEnable(true) != true) {
+    Serial.println("[MODEM] Failed to enable modem sleep mode!");
+    return false;
+  } else {
+    Serial.println("[MODEM] Modem enter sleep mode!");
+  }
+  return true;
+}
+
 bool initModem() {
   // Guard: prevent re-initialization if modem already initialized
   static bool modemInitialized = false;
@@ -355,10 +463,8 @@ bool initModem() {
     return true;
   }
 
-  Serial.println("[MODEM] Performing cold modem bring-up...");
   beginModemSerial();
   configureModemPinsForAwakeState();
-  hardResetAndPowerOnModem();
 
   // Critical: Wait for voltage rails to stabilize after the power spike
   Serial.println("[MODEM] Settling power rails...");
@@ -394,7 +500,7 @@ int uploadPhoto(const uint8_t *photoData, uint32_t photoSize,
     return -1;
   }
 
-  if (!initModem()) {
+  if (!wakeupModem()) {
     Serial.println("[HTTP] Modem not ready for /upload-trap-image");
     return -1;
   }

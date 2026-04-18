@@ -177,7 +177,7 @@ static bool waitForDoneLine(uint32_t timeoutMs, uint32_t &outRemoteCRC, bool &ou
 
 // ==================== PUBLIC API ====================
 
-void initESPNOW() {
+void initUART() {
   Serial.println("[LINK] Initializing UART camera link...");
   WiFi.mode(WIFI_OFF);
   btStop();
@@ -196,7 +196,7 @@ void initESPNOW() {
   Serial.println("[LINK] UART ready: Serial2 @115200, RX=GPIO19 TX=GPIO18");
 }
 
-void cleanupESPNOW() {
+void cleanupUART() {
   Serial.println("[LINK] Cleaning up UART camera link...");
 
   if (photoBuffer) {
@@ -481,16 +481,16 @@ bool receivePhoto() {
   meta.batteryVoltage = capturedBatteryVoltageStr;
   meta.solarVoltage = capturedSolarVoltageStr;
 
-  if (initModem()) {
-    int httpCode = uploadPhoto(photoBuffer, photoSize, meta);
-    if (httpCode == 200 || httpCode == 201) {
-      Serial.println("[UPLOAD] Photo uploaded successfully!");
-    } else {
-      Serial.printf("[UPLOAD] Upload failed! HTTP %d\n", httpCode);
-    }
+  // if (initModem()) {
+  int httpCode = uploadPhoto(photoBuffer, photoSize, meta);
+  if (httpCode == 200 || httpCode == 201) {
+    Serial.println("[UPLOAD] Photo uploaded successfully!");
   } else {
-    Serial.println("[UPLOAD] Modem init failed, photo not uploaded");
+    Serial.printf("[UPLOAD] Upload failed! HTTP %d\n", httpCode);
   }
+  // } else {
+  // Serial.println("[UPLOAD] Modem init failed, photo not uploaded");
+  // }
 
   free(photoBuffer);
   photoBuffer = nullptr;
