@@ -481,16 +481,16 @@ bool receivePhoto() {
   meta.batteryVoltage = capturedBatteryVoltageStr;
   meta.solarVoltage = capturedSolarVoltageStr;
 
-  if (initModem()) {
-    int httpCode = uploadPhoto(photoBuffer, photoSize, meta);
-    if (httpCode == 200 || httpCode == 201) {
-      Serial.println("[UPLOAD] Photo uploaded successfully!");
-    } else {
-      Serial.printf("[UPLOAD] Upload failed! HTTP %d\n", httpCode);
-    }
+  // if (initModem()) {
+  int httpCode = uploadPhoto(photoBuffer, photoSize, meta);
+  if (httpCode == 200 || httpCode == 201) {
+    Serial.println("[UPLOAD] Photo uploaded successfully!");
   } else {
-    Serial.println("[UPLOAD] Modem init failed, photo not uploaded");
+    Serial.printf("[UPLOAD] Upload failed! HTTP %d\n", httpCode);
   }
+  // } else {
+  Serial.println("[UPLOAD] Modem init failed, photo not uploaded");
+  // }
 
   free(photoBuffer);
   photoBuffer = nullptr;

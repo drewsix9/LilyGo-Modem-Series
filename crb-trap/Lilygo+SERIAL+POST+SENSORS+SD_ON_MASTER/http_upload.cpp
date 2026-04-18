@@ -406,16 +406,14 @@ bool wakeupModem() {
   Serial.println("[MODEM] Calling modem.sleepEnable(false) to exit sleep...");
   modem.sleepEnable(false);
 
-  // Verify modem is responsive after wakeup
-  Serial.println("[MODEM] Verifying modem is awake...");
-  int retry = 0;
-  while (!modem.testAT(1000)) {
-    Serial.print(".");
-    if (retry++ > 10) {
-      Serial.println("\n[MODEM] Modem not responding after wakeup!");
-      return false;
-    }
+  if (!ensureRegistered()) {
+    return false;
   }
+
+  if (!ensureDataSession()) {
+    return false;
+  }
+
   Serial.println("\n[MODEM] Modem awake and responsive");
   return true;
 }
