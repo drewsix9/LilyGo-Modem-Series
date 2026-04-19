@@ -50,32 +50,81 @@
 #define SERVO_MIN_PULSE_US 500
 #define SERVO_MAX_PULSE_US 2400
 
-// ==================== SERVO HELPER FUNCTION ====================
-void executeServoAction(const char *servo_action, uint8_t servo_angle) {
+// ==================== SERVO HELPER FUNCTIONS ====================
+void handleMale() {
+  // Ensure servo is attached before starting sequence
   if (!ServoController::attached()) {
-    Serial.println("[SERVO] Servo not initialized, skipping action");
-    return;
+    Serial.println("[SERVO] Servo not attached, initializing... 100 deg");
+    ServoController::begin(SERVO_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US, 90);
+  }
+  Serial.println("[SERVO] Executing MALE action...");
+
+  for (int i = 100; i >= 45; i -= 5) {
+    // Serial.println("[SERVO] Moving to " + String(i) + "°...");
+    ServoController::writeAngle((uint8_t)i);
+    delay(20);
   }
 
-  if (strcmp(servo_action, "servo_male") == 0) {
-    Serial.printf("[SERVO] Executing MALE action: moving to 45°\n");
-    ServoController::writeAngle(45);
-  } else if (strcmp(servo_action, "servo_female") == 0) {
-    Serial.printf("[SERVO] Executing FEMALE action: moving to 135°\n");
-    ServoController::writeAngle(135);
-  } else if (strcmp(servo_action, "servo_neutral") == 0) {
+  Serial.println("[SERVO] GOING BACK TO 100...");
+  delay(2000);
+  for (int i = 45; i <= 100; i += 5) {
+    // Serial.println("[SERVO] Moving to " + String(i) + "°...");
+    ServoController::writeAngle((uint8_t)i);
+    delay(20);
+  }
+  Serial.println("[SERVO] DONE WITH MALE ACTION");
+  ServoController::detach();
+}
 
+void handleFemale() {
+  // Ensure servo is attached before starting sequence
+  if (!ServoController::attached()) {
+    Serial.println("[SERVO] Servo not attached, initializing... 85 deg");
+    ServoController::begin(SERVO_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US, 90);
+  }
+  Serial.println("[SERVO] Executing FEMALE action...");
+
+  for (int i = 85; i <= 135; i += 5) {
+    // Serial.println("[SERVO] Moving to " + String(i) + "°...");
+    delay(20);
+    ServoController::writeAngle((uint8_t)i);
+  }
+
+  Serial.println("[SERVO] GOING BACK TO 85...");
+  delay(2000);
+  for (int i = 135; i >= 85; i -= 5) {
+    // Serial.println("[SERVO] Moving to " + String(i) + "°...");
+    delay(20);
+    ServoController::writeAngle((uint8_t)i);
+  }
+  Serial.println("[SERVO] DONE WITH FEMALE ACTION");
+  ServoController::detach();
+}
+
+void executeServoAction(const char *servo_action, uint8_t servo_angle) {
+  if (strcmp(servo_action, "servo_male") == 0) {
+    handleMale();
+  } else if (strcmp(servo_action, "servo_female") == 0) {
+    handleFemale();
+  } else if (strcmp(servo_action, "servo_neutral") == 0) {
     Serial.printf("[SERVO] Executing NEUTRAL action: moving to 90°\n");
+    if (!ServoController::attached()) {
+      Serial.println("[SERVO] Servo not attached, initializing... 90 deg");
+      ServoController::begin(SERVO_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US, 90);
+    }
     ServoController::writeAngle(90);
+    delay(500);
+    ServoController::detach();
   } else if (strcmp(servo_action, "no_action") == 0) {
     Serial.println("[SERVO] No beetles detected, servo remains at current position");
   } else {
     Serial.printf("[SERVO] Unknown action: %s, moving to provided angle: %d°\n",
                   servo_action, servo_angle);
+    ServoController::begin(SERVO_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US, servo_angle);
     ServoController::writeAngle(servo_angle);
+    delay(500);
+    ServoController::detach();
   }
-
-  delay(500); // Allow servo time to reach target position
 }
 
 // ==================== GLOBALS FOR API RESPONSE DATA ====================

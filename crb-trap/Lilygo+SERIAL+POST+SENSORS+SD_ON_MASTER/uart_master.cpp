@@ -8,6 +8,7 @@
 
 #include "uart_master.h"
 #include "ESP32CAM_Slave/sdcard.h"
+#include "gps_storage.h"
 #include "http_upload.h"
 #include "uart_protocol.h"
 #include "voltage_reader.h"
@@ -463,6 +464,18 @@ bool receivePhoto() {
   }
 
   // ==================== FORMAT GPS FOR METADATA ====================
+  // Refresh GPS from EEPROM cache to ensure we have the latest saved position
+  float cached_lat = g_gps_lat;
+  float cached_lon = g_gps_lon;
+  if (loadGPSFromEEPROM(cached_lat, cached_lon)) {
+    g_gps_lat = cached_lat;
+    g_gps_lon = cached_lon;
+    g_gps_valid = true;
+    Serial.println("[GPS] Refreshed from EEPROM cache");
+  } else {
+    Serial.println("[GPS] EEPROM cache empty, using current values");
+  }
+
   char capturedGpsLatStr[16], capturedGpsLonStr[16];
   snprintf(capturedGpsLatStr, sizeof(capturedGpsLatStr), "%.6f", g_gps_lat);
   snprintf(capturedGpsLonStr, sizeof(capturedGpsLonStr), "%.6f", g_gps_lon);

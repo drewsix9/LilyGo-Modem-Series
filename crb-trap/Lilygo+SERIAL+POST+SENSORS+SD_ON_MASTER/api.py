@@ -426,6 +426,8 @@ def upload_trap_image():
                 trap_update_data["status"] = "inactive"
                 logger.info(
                     f"[STATUS UPDATE] Trap {trap_id} marked as INACTIVE (fallen detected)")
+            else:
+                trap_update_data["status"] = "active"
 
             traps_update = supabase.table("traps").update(
                 trap_update_data).eq("trap_id", trap_id).execute()

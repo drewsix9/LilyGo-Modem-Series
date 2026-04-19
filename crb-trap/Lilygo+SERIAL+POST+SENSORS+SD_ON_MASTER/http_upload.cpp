@@ -147,14 +147,19 @@ static void parseServoActionFromResponse(const String &jsonBody) {
   // Extract servo_action
   int actionStart = jsonBody.indexOf("\"servo_action\"");
   if (actionStart != -1) {
-    int valueStart = jsonBody.indexOf("\"", actionStart + 16);
-    if (valueStart != -1) {
-      int valueEnd = jsonBody.indexOf("\"", valueStart + 1);
-      if (valueEnd != -1) {
-        String action = jsonBody.substring(valueStart + 1, valueEnd);
-        if (action.length() > 0 && action.length() < 32) {
-          action.toCharArray(g_servo_action, 32);
-          Serial.printf("[SERVO] Parsed servo_action: %s\n", g_servo_action);
+    // Find the colon after "servo_action"
+    int colonPos = jsonBody.indexOf(":", actionStart);
+    if (colonPos != -1) {
+      // Find the opening quote of the value after the colon
+      int valueStart = jsonBody.indexOf("\"", colonPos);
+      if (valueStart != -1) {
+        int valueEnd = jsonBody.indexOf("\"", valueStart + 1);
+        if (valueEnd != -1) {
+          String action = jsonBody.substring(valueStart + 1, valueEnd);
+          if (action.length() > 0 && action.length() < 32) {
+            action.toCharArray(g_servo_action, 32);
+            Serial.printf("[SERVO] Parsed servo_action: %s\n", g_servo_action);
+          }
         }
       }
     }
@@ -163,23 +168,27 @@ static void parseServoActionFromResponse(const String &jsonBody) {
   // Extract servo_angle
   int angleStart = jsonBody.indexOf("\"servo_angle\"");
   if (angleStart != -1) {
-    int valueStart = angleStart + 14;
-    // Skip colon and whitespace
-    while (valueStart < (int)jsonBody.length() &&
-           (jsonBody[valueStart] == ':' || jsonBody[valueStart] == ' ')) {
-      valueStart++;
-    }
-    // Parse numeric value
-    int valueEnd = valueStart;
-    while (valueEnd < (int)jsonBody.length() && isdigit(jsonBody[valueEnd])) {
-      valueEnd++;
-    }
-    if (valueEnd > valueStart) {
-      String angleStr = jsonBody.substring(valueStart, valueEnd);
-      uint8_t angle = (uint8_t)angleStr.toInt();
-      if (angle >= 0 && angle <= 180) {
-        g_servo_angle = angle;
-        Serial.printf("[SERVO] Parsed servo_angle: %d°\n", g_servo_angle);
+    // Find the colon after "servo_angle"
+    int colonPos = jsonBody.indexOf(":", angleStart);
+    if (colonPos != -1) {
+      // Skip colon and whitespace to find the numeric value
+      int valueStart = colonPos + 1;
+      while (valueStart < (int)jsonBody.length() &&
+             (jsonBody[valueStart] == ':' || jsonBody[valueStart] == ' ' || jsonBody[valueStart] == '\"')) {
+        valueStart++;
+      }
+      // Parse numeric value
+      int valueEnd = valueStart;
+      while (valueEnd < (int)jsonBody.length() && isdigit(jsonBody[valueEnd])) {
+        valueEnd++;
+      }
+      if (valueEnd > valueStart) {
+        String angleStr = jsonBody.substring(valueStart, valueEnd);
+        uint8_t angle = (uint8_t)angleStr.toInt();
+        if (angle >= 0 && angle <= 180) {
+          g_servo_angle = angle;
+          Serial.printf("[SERVO] Parsed servo_angle: %d°\n", g_servo_angle);
+        }
       }
     }
   }
