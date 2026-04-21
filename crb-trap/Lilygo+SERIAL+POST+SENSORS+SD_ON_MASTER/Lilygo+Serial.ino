@@ -180,9 +180,9 @@ void setup() {
   // Serial.printf("[SD] Master SD archive status: %s\n", sdReady ? "READY" : "UNAVAILABLE");
 
   // Initialize servo for sex-based separation
-  bool servoReady = ServoController::begin(SERVO_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US, 90);
-  Serial.printf("[SERVO] Servo init status: %s (pin %d, start angle 90°)\n",
-                servoReady ? "OK" : "FAILED", SERVO_PIN);
+  // bool servoReady = ServoController::begin(SERVO_PIN, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US, 90);
+  // Serial.printf("[SERVO] Servo init status: %s (pin %d, start angle 90°)\n",
+  //               servoReady ? "OK" : "FAILED", SERVO_PIN);
 
   // ==================== INITIALIZE GPS ON COLD BOOT ONLY ====================
   // If this is cold boot (not PIR deep-sleep wakeup), read GPS and cache it.

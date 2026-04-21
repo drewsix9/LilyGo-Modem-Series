@@ -5,16 +5,28 @@
  * @copyright Copyright (c) 2026
  */
 
-#include "servo_controller.h"
+#include <ESP32Servo.h>
 
 #define SERVO_MIN_PULSE_US 500
 #define SERVO_MAX_PULSE_US 2400
 
 // Configuration
 const int SERVO_PIN = 13;
-const uint16_t MIN_PULSE_US = 500;
-const uint16_t MAX_PULSE_US = 2400;
+const uint16_t MIN_PULSE_US = SERVO_MIN_PULSE_US;
+const uint16_t MAX_PULSE_US = SERVO_MAX_PULSE_US;
 const uint8_t START_ANGLE = 90;
+
+Servo myServo;
+
+void handleMale();
+void handleFemale();
+void handleWriteAngle(String input);
+void handleReadAngle();
+void handleInfo();
+void handleTest();
+void handleDetach();
+void handleAttach();
+void printMenu();
 
 void setup() {
   Serial.begin(115200);
@@ -30,32 +42,27 @@ void setup() {
   Serial.println("  Max Pulse: " + String(MAX_PULSE_US) + " µs");
   Serial.println("  Start Angle: " + String(START_ANGLE) + "°");
 
-  gpio_set_drive_capability((gpio_num_t)SERVO_PIN, GPIO_DRIVE_CAP_3);
-
-  // bool initialized = ServoController::begin(SERVO_PIN, MIN_PULSE_US, MAX_PULSE_US, START_ANGLE);
-
-  // if (initialized) {
-  //   Serial.println("[OK] Servo initialized successfully!");
-  //   Serial.println("  Attached: " + String(ServoController::attached() ? "YES" : "NO"));
-  //   Serial.println("  Pin: " + String(ServoController::pin()));
-  // } else {
-  //   Serial.println("[ERROR] Failed to initialize servo!");
-  // }
+  // myServo.attach(SERVO_PIN, MIN_PULSE_US, MAX_PULSE_US);
+  myServo.setPeriodHertz(50); // Set to 50 Hz for standard servos
+  // myServo.write(START_ANGLE);
+  Serial.println("[OK] Servo initialized and attached.\n");
 
   printMenu();
 }
 
 void handleMale() {
   // Ensure servo is attached before starting sequence
-  if (!ServoController::attached()) {
+  if (!myServo.attached()) {
+    delay(20);
     Serial.println("[SERVO] Servo not attached, initializing... 100 deg");
-    ServoController::begin(SERVO_PIN, MIN_PULSE_US, MAX_PULSE_US, 90);
+    myServo.attach(SERVO_PIN, MIN_PULSE_US, MAX_PULSE_US);
   }
+
   Serial.println("[SERVO] Executing MALE action...");
 
   for (int i = 100; i >= 45; i -= 5) {
     // Serial.println("[SERVO] Moving to " + String(i) + "°...");
-    ServoController::writeAngle((uint8_t)i);
+    myServo.write(i);
     delay(20);
   }
 
@@ -63,25 +70,26 @@ void handleMale() {
   delay(2000);
   for (int i = 45; i <= 100; i += 5) {
     // Serial.println("[SERVO] Moving to " + String(i) + "°...");
-    ServoController::writeAngle((uint8_t)i);
+    myServo.write(i);
     delay(20);
   }
   Serial.println("[SERVO] DONE WITH MALE ACTION");
-  ServoController::detach();
 }
 
 void handleFemale() {
   // Ensure servo is attached before starting sequence
-  if (!ServoController::attached()) {
+  if (!myServo.attached()) {
+    delay(20);
     Serial.println("[SERVO] Servo not attached, initializing... 85 deg");
-    ServoController::begin(SERVO_PIN, MIN_PULSE_US, MAX_PULSE_US, 90);
+    myServo.attach(SERVO_PIN, MIN_PULSE_US, MAX_PULSE_US);
   }
+
   Serial.println("[SERVO] Executing FEMALE action...");
 
   for (int i = 85; i <= 135; i += 5) {
     // Serial.println("[SERVO] Moving to " + String(i) + "°...");
     delay(20);
-    ServoController::writeAngle((uint8_t)i);
+    myServo.write(i);
   }
 
   Serial.println("[SERVO] GOING BACK TO 85...");
@@ -89,10 +97,9 @@ void handleFemale() {
   for (int i = 135; i >= 85; i -= 5) {
     // Serial.println("[SERVO] Moving to " + String(i) + "°...");
     delay(20);
-    ServoController::writeAngle((uint8_t)i);
+    myServo.write(i);
   }
   Serial.println("[SERVO] DONE WITH FEMALE ACTION");
-  ServoController::detach();
 }
 
 void loop() {
@@ -190,15 +197,14 @@ void handleWriteAngle(String input) {
 
       Serial.println("[ACTION] Writing angle " + String(angle) + "° to servo...");
 
-      bool result = ServoController::writeAngle((uint8_t)angle);
-
-      if (result) {
+      if (myServo.attached()) {
+        myServo.write((uint8_t)angle);
         delay(500); // Allow servo to settle
-        uint8_t readBack = ServoController::readAngle();
+        uint8_t readBack = myServo.read();
         Serial.println("[OK] Successfully wrote angle " + String(angle) +
                        "° (read back: " + String(readBack) + "°)");
       } else {
-        Serial.println("[ERROR] Failed to write angle to servo!");
+        Serial.println("[ERROR] Servo not attached!");
       }
 
       return;
@@ -212,17 +218,21 @@ void handleWriteAngle(String input) {
 void handleReadAngle() {
   Serial.println("[READ] Reading angle from servo...");
 
-  uint8_t angle = ServoController::readAngle();
-  Serial.println("[OK] Current angle: " + String(angle) + "°");
+  if (myServo.attached()) {
+    uint8_t angle = myServo.read();
+    Serial.println("[OK] Current angle: " + String(angle) + "°");
+  } else {
+    Serial.println("[ERROR] Servo not attached!");
+  }
 }
 
 void handleInfo() {
   Serial.println("\n========== SERVO STATUS ==========");
-  Serial.println("Attached: " + String(ServoController::attached() ? "YES" : "NO"));
-  Serial.println("Pin: " + String(ServoController::pin()));
+  Serial.println("Attached: " + String(myServo.attached() ? "YES" : "NO"));
+  Serial.println("Pin: " + String(SERVO_PIN));
 
-  if (ServoController::attached()) {
-    uint8_t angle = ServoController::readAngle();
+  if (myServo.attached()) {
+    uint8_t angle = myServo.read();
     Serial.println("Current Angle: " + String(angle) + "°");
   }
 
@@ -231,6 +241,11 @@ void handleInfo() {
 
 void handleTest() {
   Serial.println("[TEST] Running angle sequence test (0° → 90° → 180°)...\n");
+
+  if (!myServo.attached()) {
+    Serial.println("[ERROR] Servo not attached!");
+    return;
+  }
 
   uint8_t testAngles[] = {0, 45, 90, 135, 180};
   int testAnglesCount = sizeof(testAngles) / sizeof(testAngles[0]);
@@ -241,15 +256,10 @@ void handleTest() {
     Serial.print("[TEST] Step " + String(i + 1) + "/" + String(testAnglesCount) +
                  ": Writing " + String(angle) + "°... ");
 
-    bool result = ServoController::writeAngle(angle);
-
-    if (result) {
-      delay(500); // Allow servo to move
-      uint8_t readBack = ServoController::readAngle();
-      Serial.println("OK (read: " + String(readBack) + "°)");
-    } else {
-      Serial.println("FAILED!");
-    }
+    myServo.write(angle);
+    delay(500); // Allow servo to move
+    uint8_t readBack = myServo.read();
+    Serial.println("OK (read: " + String(readBack) + "°)");
 
     delay(500); // Wait between steps
   }
@@ -259,16 +269,17 @@ void handleTest() {
 
 void handleDetach() {
   Serial.println("[ACTION] Detaching servo...");
-  ServoController::detach();
-  Serial.println("[OK] Servo detached (pin: " + String(ServoController::pin()) + ")");
+  myServo.detach();
+  Serial.println("[OK] Servo detached.");
 }
 
 void handleAttach() {
   Serial.println("[ACTION] Attaching servo...");
-  bool result = ServoController::begin(SERVO_PIN, MIN_PULSE_US, MAX_PULSE_US, START_ANGLE);
+  int pinNum = myServo.attach(SERVO_PIN, MIN_PULSE_US, MAX_PULSE_US);
 
-  if (result) {
-    Serial.println("[OK] Servo attached successfully!");
+  if (pinNum != -1) {
+    myServo.write(START_ANGLE);
+    Serial.println("[OK] Servo attached successfully on pin " + String(pinNum) + "!");
   } else {
     Serial.println("[ERROR] Failed to attach servo!");
   }

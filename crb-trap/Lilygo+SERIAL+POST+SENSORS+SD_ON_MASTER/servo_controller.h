@@ -7,8 +7,8 @@
 
 #pragma once
 
-#include "../../lib/ESP32Servo/src/ESP32Servo.h"
 #include <Arduino.h>
+#include <ESP32Servo.h>
 
 namespace ServoController {
 
